@@ -4,14 +4,14 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Betbook",
-  description: "Учебная PvP-рулетка с ботами и виртуальными ставками."
+  description: "Навчальна рулетка з ботами й віртуальними ставками."
 };
 
 export const viewport: Viewport = { viewportFit: "cover", themeColor: "#100a18" };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="ru">
+    <html lang="uk">
       <body>
         <Script src="https://telegram.org/js/telegram-web-app.js?65" strategy="beforeInteractive" />
         {children}

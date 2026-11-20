@@ -1,74 +1,81 @@
 export const DAILY_BONUS = 100;
 export const INTRO_ROUNDS = 3;
-const BOT_ADVANTAGE = 0.08;
+export const ROUND_MS = 120_000;
 
-export const BOTS = [
-  { id: "nova", name: "Nova", initials: "NV", color: "#b488ff" },
-  { id: "mako", name: "Mako", initials: "MK", color: "#55ebdc" },
-  { id: "rio", name: "Rio", initials: "RI", color: "#ffac75" }
-] as const;
+const NAMES = "Неон Луна Тайфун Сіріус Рись Мавка Онікс Кобра Сонар Барс Міраж Вихор Кварц Сокіл Туман Хвиля Флінт Фенікс Клен Бурштин Грім Спалах Крук Лотос Іскра Сапфір Сова Ріф Скат Оріон Сірко Метеор Пульс Обрій М’ята Тайга Сойка Комета Радар Варта Берег Злива Гейзер Лава Атлас Шторм Блиск Дюна".split(" ");
+const COLORS = ["#ac84fa", "#56e8d7", "#ffae72", "#63afff", "#ef8aeb", "#d5e973", "#f77a77", "#8be5ff", "#f8d589", "#b0f38c", "#8879ff", "#ff97c1"];
 
-export type BotId = (typeof BOTS)[number]["id"];
-export type Participant = {
-  id: "player" | BotId;
-  name: string;
-  initials: string;
-  color: string;
-  stake: number;
-  share: number;
-  chance: number;
-};
-export type RoundOffer = { number: number; botStakes: readonly number[] };
+export type Avatar = { name: string; color: string; avatar: number };
+type Contestant = Avatar & { id: string; stake: number };
+export type Participant = Contestant & { share: number; chance: number };
+export type RoundOffer = { number: number; endsAt: number; bots: Contestant[]; returnFactor: number | null };
 export type Round = {
   number: number;
-  winner: Participant["id"];
+  winner: string;
   participants: Participant[];
   stake: number;
   pot: number;
 };
 export type GameState = {
-  profile: {
-    name: string;
-    balance: number;
-    rounds: number;
-    net: number;
-    netLoss: number;
-    bonusDay: string;
-  };
+  now: number;
+  profile: Avatar & { balance: number; rounds: number; netLoss: number; bonusDay: string };
   offer: RoundOffer;
-  feed: { bot: BotId; pot: number }[];
-  latest: Round | null;
+  bet: { stake: number } | null;
+  feed: (Avatar & { round: number; pot: number; key: string })[];
+  latest: Round;
+  lastBet: Round | null;
 };
 
-const BOT_STAKES = [
-  [8, 5, 3], [3, 2, 2], [7, 4, 3], [4, 3, 2],
-  [3, 2, 1], [12, 6, 3], [4, 3, 1], [5, 5, 2]
-] as const;
+function randomFor(seed: number) {
+  let state = seed | 0;
+  return () => {
+    state = (state + 0x6d2b79f5) | 0;
+    let mixed = Math.imul(state ^ (state >>> 15), 1 | state);
+    mixed ^= mixed + Math.imul(mixed ^ (mixed >>> 7), 61 | mixed);
+    return ((mixed ^ (mixed >>> 14)) >>> 0) / 4_294_967_296;
+  };
+}
 
-export function roundOffer(number: number): RoundOffer {
-  return { number, botStakes: BOT_STAKES[(number - 1) % BOT_STAKES.length] };
+export function roundNumber(now: number) {
+  return Math.floor(now / ROUND_MS);
+}
+
+export function roundOffer(number: number, returnFactor: number | null): RoundOffer {
+  const random = randomFor(number);
+  const pool = [...NAMES];
+  const count = 8 + Math.floor(random() * 5);
+  const bots = COLORS.slice(0, count).map((color) => {
+    const index = Math.floor(random() * pool.length);
+    const [name] = pool.splice(index, 1);
+    const id = NAMES.indexOf(name);
+    return { id: "bot-" + id, name, avatar: Math.imul(id + 13, 0x7feb352d) >>> 0, color,
+      stake: 1 + Math.floor(random() * (number % 5 === 0 ? 20 : 6)) };
+  });
+  return { number, endsAt: (number + 1) * ROUND_MS, bots, returnFactor };
+}
+
+export function getReturnFactor(number: number, completed: number, streak: number) {
+  if (completed < INTRO_ROUNDS) return null;
+  const cycle = [0.54, 0.66, 0.73, 0.61, 0.79, 0.57];
+  return Math.min(0.92, cycle[(number + completed) % cycle.length] + Math.min(5, streak) * 0.055);
 }
 
 export function totalPot(offer: RoundOffer, stake: number) {
-  return offer.botStakes.reduce((total, amount) => total + amount, stake);
+  return offer.bots.reduce((total, bot) => total + bot.stake, stake);
 }
 
-export function lineup(offer: RoundOffer, stake: number): Participant[] {
-  const pot = totalPot(offer, stake);
+export function lineup(offer: RoundOffer, stake: number, player: Avatar): Participant[] {
+  const botsPot = totalPot(offer, 0);
+  const pot = botsPot + stake;
   const share = stake / pot;
-  const chance = stake <= 0 ? 0 : offer.number <= INTRO_ROUNDS ? 1 : share * BOT_ADVANTAGE;
-  const botsPot = pot - stake;
-  return [
-    { id: "player", name: "Вы", initials: "ВЫ", color: "#ff75b9", stake, share, chance },
-    ...BOTS.map((bot, index) => {
-      const amount = offer.botStakes[index];
-      return { ...bot, stake: amount, share: amount / pot, chance: (1 - chance) * amount / botsPot };
-    })
-  ];
+  const chance = stake <= 0 ? 0 : offer.returnFactor === null ? 1 : share * offer.returnFactor;
+  const bots = offer.bots.map((bot) => ({ ...bot, share: bot.stake / pot, chance: (1 - chance) * bot.stake / botsPot }));
+  if (!stake) return bots;
+  return [{ ...player, id: "player", stake, share, chance }, ...bots];
 }
 
-export function resolveRound(offer: RoundOffer, stake: number, draw: number): Round {
-  const participants = lineup(offer, stake);
+export function resolveRound(offer: RoundOffer, stake: number, player: Avatar, draw: number): Round {
+  const participants = lineup(offer, stake, player);
   let remainder = draw;
   let winner = participants[participants.length - 1].id;
   for (const participant of participants) {
@@ -79,4 +86,8 @@ export function resolveRound(offer: RoundOffer, stake: number, draw: number): Ro
     }
   }
   return { number: offer.number, winner, participants, stake, pot: totalPot(offer, stake) };
+}
+
+export function botRound(number: number) {
+  return resolveRound(roundOffer(number, 0), 0, { name: "", avatar: 0, color: "" }, randomFor(number ^ 0x51a537)());
 }

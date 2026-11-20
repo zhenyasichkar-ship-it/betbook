@@ -11,9 +11,9 @@ function failed(error: unknown) {
   if (error instanceof GameError) {
     return Response.json({ error: error.message }, { status: error.status, headers: responseHeaders });
   }
-  console.error("Betbook request failed", error instanceof Error ? error.name : "Unknown");
+  console.error("Помилка запиту Betbook", error instanceof Error ? error.name : "Невідома");
   return Response.json(
-    { error: "Сервер Betbook временно недоступен. Повторите попытку." },
+    { error: "Сервер Betbook тимчасово недоступний. Спробуйте ще раз." },
     { status: 500, headers: responseHeaders }
   );
 }
@@ -35,7 +35,7 @@ export async function POST(request: Request) {
       typeof value.round !== "number" || !Number.isSafeInteger(value.round) || value.round < 1 ||
       value.round > 2_147_483_647 || typeof value.requestId !== "string" || !uuid.test(value.requestId)
     ) {
-      throw new GameError("Введите ставку целым числом от 1 виртуального $.", 400);
+      throw new GameError("Вкажіть ставку цілим числом від 1 віртуального $.", 400);
     }
     const bet = { stake: value.stake, round: value.round, requestId: value.requestId };
     return Response.json(await placeBet(player, bet), { headers: responseHeaders });

@@ -1,16 +1,19 @@
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import pg from "pg";
 
-if (!process.env.DATABASE_URL) throw new Error("Set DATABASE_URL before applying the migration.");
+if (!process.env.DATABASE_URL) throw new Error("Налаштуйте DATABASE_URL перед запуском міграції.");
 const client = new pg.Client({ connectionString: process.env.DATABASE_URL });
 try {
   await client.connect();
-  const sql = await readFile(new URL("../db/001_initial.sql", import.meta.url), "utf8");
+  const folder = new URL("../db/", import.meta.url);
+  const migrations = (await readdir(folder)).filter((name) => /^\d+_.*\.sql$/.test(name)).sort();
   await client.query("BEGIN");
   await client.query("SELECT pg_advisory_xact_lock(167112799)");
-  await client.query(sql);
+  for (const migration of migrations) {
+    await client.query(await readFile(new URL(migration, folder), "utf8"));
+  }
   await client.query("COMMIT");
-  console.log("Betbook database is ready.");
+  console.log("База Betbook готова.");
 } finally {
   await client.end();
 }

@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useRef, useState, type CSSProperties, type FormEvent } from "react";
-import { BOTS, DAILY_BONUS, INTRO_ROUNDS, lineup, roundOffer, totalPot, type GameState, type Participant } from "../lib/game";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { DAILY_BONUS, INTRO_ROUNDS, lineup, roundOffer, totalPot, type GameState, type Round } from "../lib/game";
+import { AvatarBadge, BotFeed, SpinWheel, cash, percent } from "./roulette";
 
 declare global {
   interface Window {
@@ -9,13 +10,11 @@ declare global {
   }
 }
 
-const cashFormat = new Intl.NumberFormat("ru-RU");
-const percentFormat = new Intl.NumberFormat("ru-RU", { style: "percent", maximumFractionDigits: 1 });
-const cash = (value: number) => cashFormat.format(value) + " $";
-const percent = (value: number) => percentFormat.format(value);
-
 type Tab = "wheel" | "profile" | "credits";
 type Bet = { round: number; stake: number; requestId: string };
+const PLACEHOLDER = roundOffer(1, 0);
+const GUEST = { name: "Ви", avatar: 1, color: "#ff75b9" };
+const OFFLINE = "Зв’язок перервано. Перевірте підключення.";
 
 class ApiError extends Error {
   constructor(message: string, public readonly status: number) {
@@ -28,60 +27,31 @@ async function requestGame(bet?: Bet): Promise<GameState> {
   const headers = new Headers();
   if (initData) headers.set("Authorization", "tma " + initData);
   if (bet) headers.set("Content-Type", "application/json");
-  const response = await fetch("/api/game", {
-    method: bet ? "POST" : "GET",
-    headers,
-    body: bet ? JSON.stringify(bet) : undefined,
-    cache: "no-store"
-  });
-  if (!response.ok) {
-    const body = await response.json().catch(() => null);
-    throw new ApiError(body?.error ?? "Не удалось связаться с Betbook.", response.status);
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 12_000);
+  try {
+    const response = await fetch("/api/game", {
+      method: bet ? "POST" : "GET",
+      headers,
+      body: bet ? JSON.stringify(bet) : undefined,
+      cache: "no-store",
+      signal: controller.signal
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => null);
+      throw new ApiError(body?.error ?? "Не вдалося зв’язатися з Betbook.", response.status);
+    }
+    return await response.json();
+  } finally {
+    window.clearTimeout(timeout);
   }
-  return response.json();
 }
 
-function SymbolMark({ name }: { name: Tab }) {
-  const symbols = { wheel: "◉", profile: "♙", credits: "✦" };
-  return <span aria-hidden="true" className="tab-icon">{symbols[name]}</span>;
-}
-
-function SpinWheel({ players, angle, spinning }: { players: Participant[]; angle: number; spinning: boolean }) {
-  let position = 0;
-  const stops = players.filter((player) => player.share > 0).map((player) => {
-    const from = position;
-    position += player.share * 360;
-    return player.color + " " + from + "deg " + position + "deg";
-  });
-  return (
-    <div className="wheel-frame" aria-hidden="true">
-      <div className="pointer" />
-      <div className={"wheel-rotor" + (spinning ? " spinning" : "")} style={{
-        transform: "rotate(" + angle + "deg)",
-        backgroundImage: "conic-gradient(" + stops.join(", ") + ")"
-      }}>
-        <div className="wheel-rings" />
-      </div>
-      <div className="wheel-center"><span>BB</span></div>
-    </div>
-  );
-}
-
-function BotFeed({ feed }: { feed: GameState["feed"] }) {
-  return (
-    <section className="feed" aria-label="Выигрыши ботов">
-      <h2><span aria-hidden="true">✦</span> Выигрыши ботов</h2>
-      {feed.length ? (
-        <ul>
-          {feed.map((item, index) => (
-            <li key={index}>
-              <span>{BOTS.find((bot) => bot.id === item.bot)?.name}</span><strong>{cash(item.pot)}</strong>
-            </li>
-          ))}
-        </ul>
-      ) : <p>Здесь появятся крупнейшие выигрыши ботов из последних раундов.</p>}
-    </section>
-  );
+function resultMessage(round: Round) {
+  if (round.winner === "player") return "Ви виграли " + cash(round.pot - round.stake) + " чистими.";
+  const winner = round.participants.find((player) => player.id === round.winner);
+  return (winner?.name ?? "Бот") + " забирає банк " + cash(round.pot) + "." +
+    (round.stake ? " Ви втратили " + cash(round.stake) + "." : "");
 }
 
 const credits = [
@@ -92,72 +62,106 @@ const credits = [
 export default function Betbook() {
   const [tab, setTab] = useState<Tab>("wheel");
   const [state, setState] = useState<GameState | null>(null);
+  const [clock, setClock] = useState(0);
   const [amount, setAmount] = useState("10");
-  const [pending, setPending] = useState<Bet | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [angle, setAngle] = useState(0);
-  const [message, setMessage] = useState("");
+  const [retry, setRetry] = useState<Bet | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [spin, setSpin] = useState<Round | null>(null);
   const [error, setError] = useState("");
+  const snapshot = useRef<GameState | null>(null);
+  const timeOffset = useRef(0);
   const requestActive = useRef(false);
+  const lastRefresh = useRef(0);
+  const requiresTelegram = useRef(false);
+  const spinTimeout = useRef(0);
 
-  async function reload() {
-    setError("");
+  function applyState(next: GameState) {
+    const previous = snapshot.current;
+    snapshot.current = next;
+    timeOffset.current = next.now - Date.now();
+    setClock(next.now);
+    setState(next);
+    if (previous && previous.offer.number < next.offer.number && !document.hidden) {
+      window.clearTimeout(spinTimeout.current);
+      setSpin(next.latest);
+      const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      spinTimeout.current = window.setTimeout(() => setSpin(null), reduced ? 650 : 2650);
+    }
+  }
+
+  async function refresh() {
+    if (requestActive.current) return;
+    requestActive.current = true;
+    lastRefresh.current = Date.now();
     try {
-      const next = await requestGame();
-      setState(next);
+      applyState(await requestGame());
+      requiresTelegram.current = false;
+      setError("");
     } catch (failure) {
-      setError(failure instanceof ApiError ? failure.message : "Связь прервана. Проверьте подключение.");
+      requiresTelegram.current = failure instanceof ApiError && failure.status === 401;
+      setError(failure instanceof ApiError ? failure.message : OFFLINE);
+    } finally {
+      requestActive.current = false;
     }
   }
 
   useEffect(() => {
     window.Telegram?.WebApp?.ready();
     window.Telegram?.WebApp?.expand();
-    void reload();
+    void refresh();
+    const timer = window.setInterval(() => {
+      if (document.hidden) return;
+      const now = Date.now();
+      const serverTime = now + timeOffset.current;
+      setClock(serverTime);
+      const elapsed = now - lastRefresh.current;
+      const roundEnded = snapshot.current && serverTime >= snapshot.current.offer.endsAt;
+      if (!requiresTelegram.current && (elapsed > 18_000 || (roundEnded && elapsed > 1600))) void refresh();
+    }, 500);
+    function resume() {
+      if (!document.hidden && !requiresTelegram.current) void refresh();
+    }
+    document.addEventListener("visibilitychange", resume);
+    return () => {
+      window.clearInterval(timer);
+      window.clearTimeout(spinTimeout.current);
+      document.removeEventListener("visibilitychange", resume);
+    };
   }, []);
 
-  const offer = state?.offer ?? roundOffer(1);
-  const stake = pending?.stake ?? Number(amount);
-  const validStake = Number.isSafeInteger(stake) && stake > 0;
-  const displayStake = validStake ? stake : 0;
-  const participantList = lineup(offer, displayStake);
+  const offer = state?.offer ?? PLACEHOLDER;
+  const player = useMemo(() => state ? { ...state.profile, name: "Ви" } : GUEST, [state]);
   const balance = state?.profile.balance ?? 0;
-  const latest = state?.latest;
+  const stake = Number(amount);
+  const validStake = Number.isSafeInteger(stake) && stake > 0;
+  const placed = state?.bet?.stake ?? 0;
+  const participants = useMemo(() => lineup(offer, placed, player), [offer, placed, player]);
+  const estimated = useMemo(() => validStake ? lineup(offer, stake, player)[0] : null, [offer, player, stake, validStake]);
+  const remaining = state ? Math.max(0, Math.ceil((offer.endsAt - clock) / 1000)) : 0;
+  const countdown = state ? Math.floor(remaining / 60) + ":" + String(remaining % 60).padStart(2, "0") : "—";
+  const locked = !state || submitting || !!spin || !!placed || remaining === 0;
+  const lastBet = state?.lastBet;
 
   async function submit(event: FormEvent) {
     event.preventDefault();
-    if (requestActive.current || !state || (!pending && (!validStake || stake > balance))) return;
+    if (requestActive.current || !state || (!retry && (locked || !validStake || stake > balance))) return;
     requestActive.current = true;
-    const bet = pending ?? { round: offer.number, stake, requestId: crypto.randomUUID() };
-    setPending(bet);
-    setBusy(true);
+    const bet = retry ?? { round: offer.number, stake, requestId: crypto.randomUUID() };
+    setRetry(bet);
+    setSubmitting(true);
     setError("");
-    setMessage("");
     try {
-      const next = await requestGame(bet);
-      const round = next.latest;
-      if (!round) throw new Error("Missing round");
-      const index = round.participants.findIndex((player) => player.id === round.winner);
-      const winner = round.participants[index];
-      const start = round.participants.slice(0, index).reduce((total, player) => total + player.share, 0);
-      const center = (start + winner.share / 2) * 360;
-      const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-      setAngle(2160 - center);
-      if (!reduced) await new Promise((done) => setTimeout(done, 2350));
-      setState(next);
-      setMessage(winner.id === "player"
-        ? "Вы выиграли " + cash(round.pot - round.stake) + " чистыми."
-        : winner.name + " забирает банк " + cash(round.pot) + ". Вы потеряли " + cash(round.stake) + ".");
-      setPending(null);
+      applyState(await requestGame(bet));
+      setRetry(null);
     } catch (failure) {
       if (failure instanceof ApiError && failure.status < 500) {
-        setPending(null);
-        if (failure.status === 409 || failure.status === 422) await reload();
+        setRetry(null);
+        requestActive.current = false;
+        if (failure.status === 409 || failure.status === 422) await refresh();
       }
-      setError(failure instanceof ApiError ? failure.message : "Связь прервана. Повторите ставку, чтобы получить результат.");
+      setError(failure instanceof ApiError ? failure.message : "Повторіть запит, щоб перевірити ставку.");
     } finally {
-      setAngle(0);
-      setBusy(false);
+      setSubmitting(false);
       requestActive.current = false;
     }
   }
@@ -165,72 +169,80 @@ export default function Betbook() {
   return (
     <div className="shell">
       <header className="header">
-        <a className="wordmark" href="#" onClick={(event) => { event.preventDefault(); setTab("wheel"); }} aria-label="Betbook — открыть рулетку">
+        <a className="wordmark" href="#" onClick={(event) => { event.preventDefault(); setTab("wheel"); }} aria-label="Betbook — відкрити рулетку">
           BET<span>BOOK</span>
         </a>
-        <div className="wallet"><span>Виртуальный баланс</span><strong>{state ? cash(balance) : "—"}</strong></div>
+        <div className="wallet"><span>Віртуальний баланс</span><strong>{state ? cash(balance) : "—"}</strong></div>
       </header>
       <main>
         {tab === "wheel" && (
           <>
+            <section className="bonus">
+              <div><strong>Вітальний бонус</strong><p>{state ? "Сьогодні зараховано." : "Щодня при вході в застосунок."}</p></div>
+              <span>{ "+" + cash(DAILY_BONUS)}</span>
+            </section>
             <BotFeed feed={state?.feed ?? []} />
             <section className="arena" aria-labelledby="arena-title">
               <div className="wheel-area">
                 <div className="arena-heading">
-                  <h1 id="arena-title">PvP-рулетка</h1><span>Раунд {offer.number}</span>
+                  <h1 id="arena-title">Рулетка</h1>
+                  <div className="countdown"><span>{spin ? "Розіграш" : "До розіграшу"}</span><strong>{countdown}</strong></div>
                 </div>
-                <SpinWheel players={participantList} angle={angle} spinning={busy} />
-                <div className="pot"><span>Банк раунда</span><strong>{cash(totalPot(offer, displayStake))}</strong></div>
+                <SpinWheel players={participants} spin={spin} />
+                <div className="pot"><span>Банк раунду</span><strong>{cash(spin?.pot ?? totalPot(offer, placed))}</strong></div>
               </div>
               <div className="bet-area">
                 <div className="mode">
-                  <strong>Демо подкрученной рулетки</strong>
-                  <p>{offer.number <= INTRO_ROUNDS
-                    ? "Первые " + INTRO_ROUNDS + " раунда гарантированно выигрывает игрок."
-                    : "Боты получают преимущество. Даже большая доля банка не гарантирует выигрыш."}</p>
+                  <strong>Демо з перевагою ботів</strong>
+                  <p>{offer.returnFactor === null
+                    ? "Перші " + INTRO_ROUNDS + " ставки гарантовано виграють."
+                    : "Шанс змінюється між раундами. Серія програшів додає до нього поправку."}</p>
                 </div>
                 <form onSubmit={submit}>
-                  <label htmlFor="stake">Виртуальная ставка</label>
+                  <label htmlFor="stake">Віртуальна ставка</label>
                   <div className="input-wrap">
-                    <input id="stake" type="text" inputMode="numeric" autoComplete="off" value={amount}
+                    <input id="stake" type="text" inputMode="numeric" autoComplete="off" value={placed ? String(placed) : amount}
                       onChange={(event) => { if (/^\d{0,15}$/.test(event.target.value)) setAmount(event.target.value); }}
-                      disabled={!state || busy || !!pending} />
+                      disabled={locked || !!retry} />
                     <span>$</span>
                   </div>
-                  <div className="chips" aria-label="Размер ставки">
+                  <div className="chips" aria-label="Розмір ставки">
                     {[5, 10, 25].map((value) => (
-                      <button type="button" key={value} disabled={balance < value || busy || !!pending}
+                      <button type="button" key={value} disabled={balance < value || locked || !!retry}
                         aria-pressed={Number(amount) === value} onClick={() => setAmount(String(value))}>{cash(value)}</button>
                     ))}
-                    <button type="button" disabled={balance < 1 || busy || !!pending}
-                      onClick={() => setAmount(String(balance))}>Весь баланс</button>
+                    <button type="button" disabled={balance < 1 || locked || !!retry}
+                      onClick={() => setAmount(String(balance))}>Увесь баланс</button>
                   </div>
-                  <button className="primary" disabled={busy || !state || (!pending && (!validStake || stake > balance))}>
-                    {busy ? "Розыгрыш…" : pending ? "Повторить запрос" : "Внести ставку"}
+                  {estimated && state && !placed && (
+                    <p className="odds"><span>Частка банку <strong>{percent(estimated.share)}</strong></span><span>Шанс <strong>{percent(estimated.chance)}</strong></span></p>
+                  )}
+                  <button className="primary" disabled={submitting || (!retry && (locked || !validStake || stake > balance))}>
+                    {submitting ? "Приймаємо ставку…" : retry ? "Повторити запит" : placed ? "Ставку прийнято" : "Зробити ставку"}
                   </button>
                 </form>
-                {state && !balance && !pending && <p className="notice">Следующий бонус доступен с полуночи по Киеву.</p>}
-                {state && !pending && balance > 0 && stake > balance && <p className="notice">Ставка превышает виртуальный баланс.</p>}
-                {!state && !error && <p className="notice" role="status">Загружаем игру…</p>}
-                {error && <div className="notice error" role="alert">{error}{!state && <button type="button" onClick={() => void reload()}>Обновить</button>}</div>}
-                {message && <p className="notice result" role="status">{message}</p>}
-                {latest && !message && <p className="notice">Раунд {latest.number} · {latest.participants.find((player) => player.id === latest.winner)?.name} · {cash(latest.pot)}</p>}
+                {state && !balance && !placed && <p className="notice">Наступний бонус доступний з опівночі за Києвом.</p>}
+                {state && !placed && balance > 0 && stake > balance && <p className="notice">Ставка перевищує віртуальний баланс.</p>}
+                {!state && !error && <p className="notice" role="status">Завантажуємо гру…</p>}
+                {error && <div className="notice error" role="alert">{error}<button type="button" onClick={() => void refresh()}>Оновити</button></div>}
+                {state?.latest && <p className="notice result" role="status">{resultMessage(state.latest)}</p>}
               </div>
             </section>
             <section className="entries" aria-labelledby="entries-title">
-              <h2 id="entries-title">Участники раунда</h2>
+              <h2 id="entries-title">Учасники раунду</h2>
+              <p>Вузькі сектори розширено для аватарок. Точні частки в таблиці.</p>
               <div className="entry-table">
                 <table>
-                  <thead><tr><th>Игрок</th><th>Ставка</th><th>Доля банка</th><th>Шанс</th></tr></thead>
+                  <thead><tr><th>Гравець</th><th>Ставка</th><th>Частка банку</th><th>Шанс</th></tr></thead>
                   <tbody>
-                    {participantList.map((player) => (
-                      <tr key={player.id}>
+                    {(spin?.participants ?? participants).map((entry) => (
+                      <tr key={entry.id}>
                         <th scope="row">
-                          <span className="participant" style={{ "--participant-color": player.color } as CSSProperties}>
-                            <span className="avatar" aria-hidden="true">{player.initials}</span><span>{player.name}{player.id !== "player" && <small>БОТ</small>}</span>
+                          <span className="participant">
+                            <AvatarBadge identity={entry} /><span>{entry.name}{entry.id !== "player" && <small>БОТ</small>}</span>
                           </span>
                         </th>
-                        <td>{cash(player.stake)}</td><td>{percent(player.share)}</td><td className="chance">{percent(player.chance)}</td>
+                        <td>{cash(entry.stake)}</td><td>{percent(entry.share)}</td><td className="chance">{percent(entry.chance)}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -241,29 +253,29 @@ export default function Betbook() {
         )}
         {tab === "profile" && (
           <section className="info-page">
-            <h1>Профиль</h1>
-            <p className="profile-name">{state?.profile.name ?? "Игрок"}</p>
+            <h1>Профіль</h1>
+            {state && <p className="profile-name participant"><AvatarBadge identity={state.profile} />{state.profile.name}</p>}
             <dl className="stats">
-              <div><dt>Виртуальный баланс</dt><dd>{state ? cash(balance) : "—"}</dd></div>
-              <div><dt>Чистый проигрыш</dt><dd>{state ? cash(state.profile.netLoss) : "—"}</dd></div>
-              <div><dt>Сыграно раундов</dt><dd>{state?.profile.rounds ?? "—"}</dd></div>
+              <div><dt>Віртуальний баланс</dt><dd>{state ? cash(balance) : "—"}</dd></div>
+              <div><dt>Чистий програш</dt><dd>{state ? cash(state.profile.netLoss) : "—"}</dd></div>
+              <div><dt>Зіграно раундів</dt><dd>{state?.profile.rounds ?? "—"}</dd></div>
             </dl>
-            <p>Чистый проигрыш — ставки за вычетом выплат. Бонусы в расчёт не входят.</p>
-            <p>Ежедневный бонус {cash(DAILY_BONUS)} начисляется при входе. Новый день начинается в 00:00 по Киеву.</p>
+            {lastBet && <p>Остання ставка. {resultMessage(lastBet)}</p>}
+            <p>Чистий програш враховує ставки й виплати за завершеними раундами. Щоденні бонуси не враховуються.</p>
           </section>
         )}
         {tab === "credits" && (
-          <section className="info-page" lang="uk">
+          <section className="info-page">
             <h1>Кредити</h1>
             {credits.map((part) => <p className="credits-copy" key={part}>{part}</p>)}
           </section>
         )}
       </main>
-      <nav className="tabs" aria-label="Разделы Betbook">
-        {([["wheel", "Рулетка"], ["profile", "Профиль"], ["credits", "Кредиты"]] as const).map(([key, label]) => (
+      <nav className="tabs" aria-label="Розділи Betbook">
+        {([["wheel", "Рулетка", "◉"], ["profile", "Профіль", "♙"], ["credits", "Кредити", "✦"]] as const).map(([key, label, icon]) => (
           <button type="button" key={key} aria-current={tab === key ? "page" : undefined}
             onClick={() => { setTab(key); window.scrollTo(0, 0); }}>
-            <SymbolMark name={key} />{label}
+            <span aria-hidden="true" className="tab-icon">{icon}</span>{label}
           </button>
         ))}
       </nav>

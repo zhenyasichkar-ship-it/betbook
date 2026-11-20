@@ -9,7 +9,7 @@ export class GameError extends Error {
 export type Player = { id: string; name: string };
 
 const MAX_AGE_SECONDS = 12 * 60 * 60;
-const INVALID = "Откройте Betbook заново из меню бота в Telegram.";
+const INVALID = "Відкрийте Betbook знову з меню бота в Telegram.";
 
 export function identify(request: Request): Player {
   const authorization = request.headers.get("authorization");
@@ -19,7 +19,7 @@ export function identify(request: Request): Player {
     process.env.BETBOOK_LOCAL_DEMO === "1" &&
     ["localhost", "127.0.0.1"].includes(new URL(request.url).hostname)
   ) {
-    return { id: "0", name: "Демо-игрок" };
+    return { id: "0", name: "Демогравець" };
   }
 
   if (!authorization?.startsWith("tma ") || authorization.length > 8192) {
@@ -27,7 +27,7 @@ export function identify(request: Request): Player {
   }
   const token = process.env.TELEGRAM_BOT_TOKEN;
   if (!token) {
-    throw new GameError("Токен Telegram ещё не настроен на сервере.", 503);
+    throw new GameError("Токен Telegram ще не налаштовано на сервері.", 503);
   }
 
   const params = new URLSearchParams(authorization.slice(4));
@@ -66,5 +66,5 @@ export function identify(request: Request): Player {
     .replaceAll("\u0000", "")
     .trim()
     .slice(0, 120);
-  return { id: String(user.id), name: name || "Игрок" };
+  return { id: String(user.id), name: name || "Гравець" };
 }
