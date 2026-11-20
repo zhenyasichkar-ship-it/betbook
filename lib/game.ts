@@ -18,7 +18,7 @@ export type Round = {
 };
 export type GameState = {
   now: number;
-  profile: Avatar & { balance: number; rounds: number; netLoss: number; bonusDay: string };
+  profile: Avatar & { balance: number; rounds: number; netLoss: number; bonusDay: string; isAdmin: boolean };
   offer: RoundOffer;
   bet: { stake: number } | null;
   feed: (Avatar & { round: number; pot: number; key: string })[];

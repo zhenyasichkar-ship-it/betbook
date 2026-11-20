@@ -4,7 +4,8 @@ import {
   botRound, DAILY_BONUS, getReturnFactor, resolveRound, roundNumber, roundOffer,
   type Avatar, type GameState, type Round
 } from "./game";
-import { GameError, type Player } from "./telegram";
+import { GameError, isAdmin, type Player } from "./telegram";
+import type { AdminStats } from "./admin";
 
 type PlayerRow = {
   balance: string;
@@ -46,25 +47,12 @@ function avatar(player: Player): Avatar {
   return { name: player.name, color: "#ff75b9", avatar: seed };
 }
 
-async function withPlayer<T>(
-  player: Player,
-  run: (db: PoolClient, row: PlayerRow, now: number) => Promise<T>
-): Promise<T> {
+async function transaction<T>(run: (db: PoolClient) => Promise<T>): Promise<T> {
   const db = await pool().connect();
   let discard = false;
   try {
     await db.query("BEGIN");
-    const result = await db.query<PlayerRow>(
-      "INSERT INTO players (telegram_id, display_name, balance, last_bonus_day) " +
-      "VALUES ($1, $2, $3, (now() AT TIME ZONE 'Europe/Kyiv')::date) " +
-      "ON CONFLICT (telegram_id) DO UPDATE SET display_name = EXCLUDED.display_name, " +
-      "balance = players.balance + CASE WHEN players.last_bonus_day < EXCLUDED.last_bonus_day THEN $3 ELSE 0 END, " +
-      "last_bonus_day = greatest(players.last_bonus_day, EXCLUDED.last_bonus_day) RETURNING " + playerFields,
-      [player.id, player.name, DAILY_BONUS]
-    );
-    const now = Date.now();
-    const settled = await settleBets(db, player, result.rows[0], roundNumber(now));
-    const value = await run(db, settled, now);
+    const value = await run(db);
     await db.query("COMMIT");
     return value;
   } catch (error) {
@@ -77,6 +65,21 @@ async function withPlayer<T>(
   } finally {
     db.release(discard);
   }
+}
+
+function withPlayer<T>(player: Player, run: (db: PoolClient, row: PlayerRow, now: number) => Promise<T>) {
+  return transaction(async (db) => {
+    const result = await db.query<PlayerRow>(
+      "INSERT INTO players (telegram_id, display_name, balance, last_bonus_day) " +
+      "VALUES ($1, $2, $3, (now() AT TIME ZONE 'Europe/Kyiv')::date) " +
+      "ON CONFLICT (telegram_id) DO UPDATE SET display_name = EXCLUDED.display_name, " +
+      "balance = players.balance + CASE WHEN players.last_bonus_day < EXCLUDED.last_bonus_day THEN $3 ELSE 0 END, " +
+      "last_bonus_day = greatest(players.last_bonus_day, EXCLUDED.last_bonus_day) RETURNING " + playerFields,
+      [player.id, player.name, DAILY_BONUS]
+    );
+    const now = Date.now();
+    return run(db, await settleBets(db, player, result.rows[0], roundNumber(now)), now);
+  });
 }
 
 async function settleBets(db: PoolClient, player: Player, row: PlayerRow, current: number) {
@@ -141,7 +144,8 @@ async function readState(db: PoolClient, player: Player, row: PlayerRow, now: nu
       balance: Number(row.balance),
       rounds: row.completed_rounds,
       netLoss: Math.max(0, -Number(row.game_net)),
-      bonusDay: row.bonus_day
+      bonusDay: row.bonus_day,
+      isAdmin: isAdmin(player)
     },
     offer: roundOffer(number, bet ? bet.return_factor : getReturnFactor(number, row.completed_rounds, row.loss_streak)),
     bet: bet ? { stake: Number(bet.stake) } : null,
@@ -149,6 +153,69 @@ async function readState(db: PoolClient, player: Player, row: PlayerRow, now: nu
     latest: lastBet?.number === number - 1 ? lastBet : previousBotRound,
     lastBet
   };
+}
+
+export function getAdminStats(player: Player) {
+  return transaction(async (db): Promise<AdminStats> => {
+    const current = roundNumber(Date.now());
+    const due = await db.query<PlayerRow & { telegram_id: string; display_name: string }>(
+      "SELECT telegram_id, display_name, " + playerFields + " FROM players WHERE telegram_id IN (" +
+      "SELECT telegram_id FROM timed_bets WHERE result IS NULL AND round_number < $1 AND telegram_id > 0 " +
+      "ORDER BY round_number LIMIT 12) ORDER BY telegram_id FOR UPDATE SKIP LOCKED",
+      [current]
+    );
+    for (const row of due.rows) {
+      await settleBets(db, { id: row.telegram_id, name: row.display_name }, row, current);
+    }
+    const totals = await db.query<{ played: string; losing: string; net_loss: string; balance: string; pending: boolean }>(
+      "SELECT count(*) FILTER (WHERE completed_rounds > 0) AS played, " +
+      "count(*) FILTER (WHERE game_net < 0) AS losing, coalesce(sum(-game_net) FILTER (WHERE game_net < 0), 0) AS net_loss, " +
+      "coalesce(max(balance) FILTER (WHERE telegram_id = $1), 0) AS balance, " +
+      "EXISTS (SELECT 1 FROM timed_bets WHERE result IS NULL AND round_number < $2 AND telegram_id > 0) AS pending " +
+      "FROM players WHERE telegram_id > 0",
+      [player.id, current]
+    );
+    const losses = await db.query<{ id: string; name: string; rounds: number; net_loss: string }>(
+      "SELECT telegram_id AS id, display_name AS name, completed_rounds AS rounds, -game_net AS net_loss " +
+      "FROM players WHERE telegram_id > 0 AND game_net < 0 ORDER BY game_net, telegram_id LIMIT 20"
+    );
+    const { played, losing, net_loss, balance, pending } = totals.rows[0];
+    return {
+      played: Number(played), losing: Number(losing), netLoss: Number(net_loss), balance: Number(balance), pending,
+      losses: losses.rows.map(({ id, name, rounds, net_loss }) => ({ id, name, rounds, netLoss: Number(net_loss) }))
+    };
+  });
+}
+
+export function addAdminCredits(player: Player, amount: number, requestId: string) {
+  return withPlayer(player, async (db, row) => {
+    const existing = await db.query<{ amount: string }>(
+      "SELECT amount FROM admin_credits WHERE telegram_id = $1 AND request_id = $2", [player.id, requestId]
+    );
+    if (existing.rows[0]) {
+      if (Number(existing.rows[0].amount) !== amount) {
+        throw new GameError("Цей запит уже використано для іншої суми.", 409);
+      }
+      return { balance: Number(row.balance) };
+    }
+    if (!Number.isSafeInteger(Number(row.balance) + amount)) throw new GameError("Досягнуто ліміту балансу.", 422);
+    const updated = await db.query<{ balance: string }>(
+      "UPDATE players SET balance = balance + $2 WHERE telegram_id = $1 RETURNING balance", [player.id, amount]
+    );
+    await db.query(
+      "INSERT INTO admin_credits (telegram_id, request_id, amount) VALUES ($1, $2, $3)", [player.id, requestId, amount]
+    );
+    return { balance: Number(updated.rows[0].balance) };
+  });
+}
+
+export function welcomeOnce(chatId: number, send: () => Promise<unknown>) {
+  return transaction(async (db) => {
+    const inserted = await db.query(
+      "INSERT INTO bot_welcomes (chat_id) VALUES ($1) ON CONFLICT DO NOTHING RETURNING chat_id", [chatId]
+    );
+    if (inserted.rowCount) await send();
+  });
 }
 
 export function openGame(player: Player) {

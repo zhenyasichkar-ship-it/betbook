@@ -285,6 +285,21 @@ h1 { font-size: clamp(1.6rem, 3vw, 2.25rem); line-height: 1.1; letter-spacing: -
 .stats dt { font-size: .85rem; color: var(--muted); }
 .stats dd { margin: 4px 0 0; font-size: 1.15rem; color: var(--mint); font-weight: 800; overflow-wrap: anywhere; }
 .credits-copy { white-space: pre-line; }
+.admin-heading, .admin-credit h2 {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+.admin-credit { padding: 14px; border-radius: 12px; background: #170d21; }
+.admin-credit h2, .admin-credit label { font-size: .94rem; }
+.admin-credit h2 span { color: var(--mint); overflow-wrap: anywhere; }
+.admin-credit form { display: grid; grid-template-columns: minmax(0, 1fr) minmax(85px, 1fr); align-items: end; gap: 8px; margin-top: 8px; }
+.admin-credit label { display: block; margin-bottom: 4px; color: var(--muted); }
+.admin-credit .primary { padding-inline: 9px; }
+.secondary { min-height: 42px; padding: 6px 10px; color: var(--ink); border: 1px solid var(--border); border-radius: 8px; background: #301b3b; }
+.admin-page tbody th { overflow-wrap: anywhere; }
+.admin-page tbody td { white-space: nowrap; }
 .tabs {
   position: fixed;
   z-index: 2;
@@ -315,6 +330,7 @@ h1 { font-size: clamp(1.6rem, 3vw, 2.25rem); line-height: 1.1; letter-spacing: -
   font-weight: 700;
 }
 .tabs button[aria-current=page] { color: #ffd3ed; background: #502344; border-color: #ff8bcc50; }
+.tabs.with-admin { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .tab-icon { font-size: 1.1rem; line-height: 1; }
 @media (max-width: 690px) {
   .shell { padding-inline: 12px; }

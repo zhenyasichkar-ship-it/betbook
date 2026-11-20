@@ -3,48 +3,16 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { DAILY_BONUS, INTRO_ROUNDS, lineup, roundOffer, totalPot, type GameState, type Round } from "../lib/game";
 import { AvatarBadge, BotFeed, SpinWheel, cash, percent } from "./roulette";
+import { ApiError, OFFLINE, request } from "./api-client";
+import { AdminPanel } from "./admin-panel";
 
-declare global {
-  interface Window {
-    Telegram?: { WebApp?: { initData?: string; ready(): void; expand(): void } };
-  }
-}
-
-type Tab = "wheel" | "profile" | "credits";
+type Tab = "wheel" | "profile" | "credits" | "admin";
 type Bet = { round: number; stake: number; requestId: string };
 const PLACEHOLDER = roundOffer(1, 0);
 const GUEST = { name: "Ви", avatar: 1, color: "#ff75b9" };
-const OFFLINE = "Зв’язок перервано. Перевірте підключення.";
 
-class ApiError extends Error {
-  constructor(message: string, public readonly status: number) {
-    super(message);
-  }
-}
-
-async function requestGame(bet?: Bet): Promise<GameState> {
-  const initData = window.Telegram?.WebApp?.initData;
-  const headers = new Headers();
-  if (initData) headers.set("Authorization", "tma " + initData);
-  if (bet) headers.set("Content-Type", "application/json");
-  const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), 12_000);
-  try {
-    const response = await fetch("/api/game", {
-      method: bet ? "POST" : "GET",
-      headers,
-      body: bet ? JSON.stringify(bet) : undefined,
-      cache: "no-store",
-      signal: controller.signal
-    });
-    if (!response.ok) {
-      const body = await response.json().catch(() => null);
-      throw new ApiError(body?.error ?? "Не вдалося зв’язатися з Betbook.", response.status);
-    }
-    return await response.json();
-  } finally {
-    window.clearTimeout(timeout);
-  }
+function requestGame(bet?: Bet) {
+  return request<GameState>("/api/game", bet);
 }
 
 function resultMessage(round: Round) {
@@ -141,6 +109,9 @@ export default function Betbook() {
   const countdown = state ? Math.floor(remaining / 60) + ":" + String(remaining % 60).padStart(2, "0") : "—";
   const locked = !state || submitting || !!spin || !!placed || remaining === 0;
   const lastBet = state?.lastBet;
+  const isAdmin = !!state?.profile.isAdmin;
+  const tabs: [Tab, string, string][] = [["wheel", "Рулетка", "◉"], ["profile", "Профіль", "♙"], ["credits", "Кредити", "✦"]];
+  if (isAdmin) tabs.push(["admin", "Адмінка", "⚙"]);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -270,9 +241,10 @@ export default function Betbook() {
             {credits.map((part) => <p className="credits-copy" key={part}>{part}</p>)}
           </section>
         )}
+        {tab === "admin" && isAdmin && <AdminPanel onBalanceUpdated={() => void refresh()} />}
       </main>
-      <nav className="tabs" aria-label="Розділи Betbook">
-        {([["wheel", "Рулетка", "◉"], ["profile", "Профіль", "♙"], ["credits", "Кредити", "✦"]] as const).map(([key, label, icon]) => (
+      <nav className={"tabs" + (isAdmin ? " with-admin" : "")} aria-label="Розділи Betbook">
+        {tabs.map(([key, label, icon]) => (
           <button type="button" key={key} aria-current={tab === key ? "page" : undefined}
             onClick={() => { setTab(key); window.scrollTo(0, 0); }}>
             <span aria-hidden="true" className="tab-icon">{icon}</span>{label}

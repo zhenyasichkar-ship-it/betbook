@@ -8,6 +8,17 @@ export class GameError extends Error {
 
 export type Player = { id: string; name: string };
 
+export function isAdmin(player: Player) {
+  return player.id !== "0" && !!process.env.ADMIN_TELEGRAM_IDS
+    ?.split(",").map((id) => id.trim()).includes(player.id);
+}
+
+export function identifyAdmin(request: Request) {
+  const player = identify(request);
+  if (!isAdmin(player)) throw new GameError("Доступ до адміністрування заборонено.", 403);
+  return player;
+}
+
 const MAX_AGE_SECONDS = 12 * 60 * 60;
 const INVALID = "Відкрийте Betbook знову з меню бота в Telegram.";
 
