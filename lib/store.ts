@@ -1,17 +1,16 @@
-import { createHash, randomInt } from "node:crypto";
+import { createHash, randomBytes, randomInt } from "node:crypto";
 import { Pool, type PoolClient } from "pg";
 import {
-  botRound, DAILY_BONUS, getReturnFactor, resolveRound, roundNumber, roundOffer,
+  botRound, DAILY_BONUS, legacyRoundNumber, resolveRound, roundNumber, roundOffer, totalPot,
   type Avatar, type GameState, type Round
 } from "./game";
 import { GameError, isAdmin, type Player } from "./telegram";
-import type { AdminStats } from "./admin";
+import { LEADERBOARD_PAGE_SIZE, type AdminStats } from "./admin";
 
 type PlayerRow = {
   balance: string;
   game_net: string;
   completed_rounds: number;
-  loss_streak: number;
   bonus_day: string;
 };
 type BetRow = {
@@ -19,11 +18,22 @@ type BetRow = {
   request_id: string;
   stake: string;
   return_factor: number | null;
+  fair_odds: boolean;
 };
 export type Bet = { stake: number; round: number; requestId: string };
 
 const cache = globalThis as typeof globalThis & { betbookPool?: Pool };
-const playerFields = "balance, game_net, completed_rounds, loss_streak, to_char(last_bonus_day, 'YYYY-MM-DD') AS bonus_day";
+const playerFields = "balance, game_net, completed_rounds, to_char(last_bonus_day, 'YYYY-MM-DD') AS bonus_day";
+
+function randomTicket(pot: number) {
+  if (pot < 2 ** 48) return randomInt(pot);
+  const bound = BigInt(pot);
+  const range = BigInt(1) << BigInt(64);
+  const cutoff = range - range % bound;
+  let draw = randomBytes(8).readBigUInt64BE();
+  while (draw >= cutoff) draw = randomBytes(8).readBigUInt64BE();
+  return Number(draw % bound);
+}
 
 function pool() {
   if (!process.env.DATABASE_URL) throw new GameError("Базу Betbook ще не налаштовано.", 503);
@@ -78,26 +88,28 @@ function withPlayer<T>(player: Player, run: (db: PoolClient, row: PlayerRow, now
       [player.id, player.name, DAILY_BONUS]
     );
     const now = Date.now();
-    return run(db, await settleBets(db, player, result.rows[0], roundNumber(now)), now);
+    return run(db, await settleBets(db, player, result.rows[0], now), now);
   });
 }
 
-async function settleBets(db: PoolClient, player: Player, row: PlayerRow, current: number) {
+async function settleBets(db: PoolClient, player: Player, row: PlayerRow, now: number) {
   const { rows } = await db.query<BetRow>(
-    "SELECT round_number, stake, return_factor FROM timed_bets " +
-    "WHERE telegram_id = $1 AND result IS NULL AND round_number < $2 ORDER BY round_number",
-    [player.id, current]
+    "SELECT round_number, stake, return_factor, fair_odds FROM timed_bets " +
+    "WHERE telegram_id = $1 AND result IS NULL AND round_number < $2 " +
+    "AND (fair_odds OR round_number < $3) ORDER BY round_number",
+    [player.id, roundNumber(now), legacyRoundNumber(now)]
   );
   for (const bet of rows) {
     const stake = Number(bet.stake);
-    const offer = roundOffer(bet.round_number, bet.return_factor);
-    const result = resolveRound(offer, stake, { ...avatar(player), name: "Ви" },
-      randomInt(1_000_000_000) / 1_000_000_000);
+    const offer = roundOffer(bet.round_number);
+    const draw = bet.fair_odds ? randomTicket(totalPot(offer, stake)) : randomInt(1_000_000_000) / 1_000_000_000;
+    const result = resolveRound(offer, stake, { ...avatar(player), name: "Ви" }, draw,
+      bet.fair_odds ? undefined : bet.return_factor);
     const payout = result.winner === "player" ? result.pot : 0;
     const updated = await db.query<PlayerRow>(
       "UPDATE players SET balance = balance + $2, game_net = game_net + $3, " +
-      "completed_rounds = completed_rounds + 1, loss_streak = $4 WHERE telegram_id = $1 RETURNING " + playerFields,
-      [player.id, payout, payout - stake, payout ? 0 : row.loss_streak + 1]
+      "completed_rounds = completed_rounds + 1 WHERE telegram_id = $1 RETURNING " + playerFields,
+      [player.id, payout, payout - stake]
     );
     await db.query(
       "UPDATE timed_bets SET result = $3, winner = $4, pot = $5 WHERE telegram_id = $1 AND round_number = $2",
@@ -115,8 +127,8 @@ function winCard(result: Round, key: string) {
 
 async function readState(db: PoolClient, player: Player, row: PlayerRow, now: number): Promise<GameState> {
   const number = roundNumber(now);
-  const current = await db.query<{ stake: string; return_factor: number | null }>(
-    "SELECT stake, return_factor FROM timed_bets WHERE telegram_id = $1 AND round_number = $2",
+  const current = await db.query<{ stake: string }>(
+    "SELECT stake FROM timed_bets WHERE telegram_id = $1 AND round_number = $2 AND fair_odds",
     [player.id, number]
   );
   const previous = await db.query<{ result: Round }>(
@@ -147,7 +159,7 @@ async function readState(db: PoolClient, player: Player, row: PlayerRow, now: nu
       bonusDay: row.bonus_day,
       isAdmin: isAdmin(player)
     },
-    offer: roundOffer(number, bet ? bet.return_factor : getReturnFactor(number, row.completed_rounds, row.loss_streak)),
+    offer: roundOffer(number),
     bet: bet ? { stake: Number(bet.stake) } : null,
     feed,
     latest: lastBet?.number === number - 1 ? lastBet : previousBotRound,
@@ -155,34 +167,44 @@ async function readState(db: PoolClient, player: Player, row: PlayerRow, now: nu
   };
 }
 
-export function getAdminStats(player: Player) {
+export function getAdminStats(player: Player, requestedPage: number) {
   return transaction(async (db): Promise<AdminStats> => {
-    const current = roundNumber(Date.now());
+    const now = Date.now();
+    const current = roundNumber(now);
+    const legacy = legacyRoundNumber(now);
     const due = await db.query<PlayerRow & { telegram_id: string; display_name: string }>(
       "SELECT telegram_id, display_name, " + playerFields + " FROM players WHERE telegram_id IN (" +
       "SELECT telegram_id FROM timed_bets WHERE result IS NULL AND round_number < $1 AND telegram_id > 0 " +
+      "AND (fair_odds OR round_number < $2) " +
       "ORDER BY round_number LIMIT 12) ORDER BY telegram_id FOR UPDATE SKIP LOCKED",
-      [current]
+      [current, legacy]
     );
     for (const row of due.rows) {
-      await settleBets(db, { id: row.telegram_id, name: row.display_name }, row, current);
+      await settleBets(db, { id: row.telegram_id, name: row.display_name }, row, now);
     }
-    const totals = await db.query<{ played: string; losing: string; net_loss: string; balance: string; pending: boolean }>(
-      "SELECT count(*) FILTER (WHERE completed_rounds > 0) AS played, " +
+    const totals = await db.query<{ total: string; played: string; losing: string; net_loss: string; balance: string; pending: boolean }>(
+      "SELECT count(*) AS total, count(*) FILTER (WHERE completed_rounds > 0) AS played, " +
       "count(*) FILTER (WHERE game_net < 0) AS losing, coalesce(sum(-game_net) FILTER (WHERE game_net < 0), 0) AS net_loss, " +
       "coalesce(max(balance) FILTER (WHERE telegram_id = $1), 0) AS balance, " +
-      "EXISTS (SELECT 1 FROM timed_bets WHERE result IS NULL AND round_number < $2 AND telegram_id > 0) AS pending " +
+      "EXISTS (SELECT 1 FROM timed_bets WHERE result IS NULL AND round_number < $2 AND telegram_id > 0 " +
+      "AND (fair_odds OR round_number < $3)) AS pending " +
       "FROM players WHERE telegram_id > 0",
-      [player.id, current]
+      [player.id, current, legacy]
     );
-    const losses = await db.query<{ id: string; name: string; rounds: number; net_loss: string }>(
-      "SELECT telegram_id AS id, display_name AS name, completed_rounds AS rounds, -game_net AS net_loss " +
-      "FROM players WHERE telegram_id > 0 AND game_net < 0 ORDER BY game_net, telegram_id LIMIT 20"
+    const { total, played, losing, net_loss, balance, pending } = totals.rows[0];
+    const pages = Math.max(1, Math.ceil(Number(total) / LEADERBOARD_PAGE_SIZE));
+    const page = Math.min(requestedPage, pages);
+    const ranks = await db.query<{ id: string; name: string; rounds: number; game_net: string }>(
+      "SELECT telegram_id AS id, display_name AS name, completed_rounds AS rounds, game_net " +
+      "FROM players WHERE telegram_id > 0 ORDER BY game_net DESC, telegram_id LIMIT $1 OFFSET $2",
+      [LEADERBOARD_PAGE_SIZE, (page - 1) * LEADERBOARD_PAGE_SIZE]
     );
-    const { played, losing, net_loss, balance, pending } = totals.rows[0];
     return {
       played: Number(played), losing: Number(losing), netLoss: Number(net_loss), balance: Number(balance), pending,
-      losses: losses.rows.map(({ id, name, rounds, net_loss }) => ({ id, name, rounds, netLoss: Number(net_loss) }))
+      leaderboard: {
+        page, pages, total: Number(total),
+        players: ranks.rows.map(({ id, name, rounds, game_net }) => ({ id, name, rounds, net: Number(game_net) }))
+      }
     };
   });
 }
@@ -243,13 +265,16 @@ export function placeBet(player: Player, bet: Bet) {
     );
     if (current.rowCount) throw new GameError("Ви вже зробили ставку в цьому раунді.", 409);
     if (bet.stake > Number(row.balance)) throw new GameError("Недостатньо віртуальних коштів.", 422);
+    if (!Number.isSafeInteger(Number(row.balance) + totalPot(roundOffer(bet.round), 0))) {
+      throw new GameError("Досягнуто ліміту балансу.", 422);
+    }
     const updated = await db.query<PlayerRow>(
       "UPDATE players SET balance = balance - $2 WHERE telegram_id = $1 RETURNING " + playerFields,
       [player.id, bet.stake]
     );
     await db.query(
-      "INSERT INTO timed_bets (telegram_id, round_number, request_id, stake, return_factor) VALUES ($1, $2, $3, $4, $5)",
-      [player.id, bet.round, bet.requestId, bet.stake, getReturnFactor(bet.round, row.completed_rounds, row.loss_streak)]
+      "INSERT INTO timed_bets (telegram_id, round_number, request_id, stake, fair_odds) VALUES ($1, $2, $3, $4, true)",
+      [player.id, bet.round, bet.requestId, bet.stake]
     );
     return readState(db, player, updated.rows[0], now);
   });

@@ -1,14 +1,14 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import { DAILY_BONUS, INTRO_ROUNDS, lineup, roundOffer, totalPot, type GameState, type Round } from "../lib/game";
+import { DAILY_BONUS, lineup, roundOffer, totalPot, type GameState, type Round } from "../lib/game";
 import { AvatarBadge, BotFeed, SpinWheel, cash, percent } from "./roulette";
 import { ApiError, OFFLINE, request } from "./api-client";
 import { AdminPanel } from "./admin-panel";
 
 type Tab = "wheel" | "profile" | "credits" | "admin";
 type Bet = { round: number; stake: number; requestId: string };
-const PLACEHOLDER = roundOffer(1, 0);
+const PLACEHOLDER = roundOffer(1);
 const GUEST = { name: "Ви", avatar: 1, color: "#ff75b9" };
 
 function requestGame(bet?: Bet) {
@@ -149,7 +149,7 @@ export default function Betbook() {
         {tab === "wheel" && (
           <>
             <section className="bonus">
-              <div><strong>Вітальний бонус</strong><p>{state ? "Сьогодні зараховано." : "Щодня при вході в застосунок."}</p></div>
+              <div><strong>Привіт! Тримай свій бонус</strong><p>{state ? "Сьогодні зараховано." : "Щодня при вході в застосунок."}</p></div>
               <span>{ "+" + cash(DAILY_BONUS)}</span>
             </section>
             <BotFeed feed={state?.feed ?? []} />
@@ -163,12 +163,6 @@ export default function Betbook() {
                 <div className="pot"><span>Банк раунду</span><strong>{cash(spin?.pot ?? totalPot(offer, placed))}</strong></div>
               </div>
               <div className="bet-area">
-                <div className="mode">
-                  <strong>Демо з перевагою ботів</strong>
-                  <p>{offer.returnFactor === null
-                    ? "Перші " + INTRO_ROUNDS + " ставки гарантовано виграють."
-                    : "Шанс змінюється між раундами. Серія програшів додає до нього поправку."}</p>
-                </div>
                 <form onSubmit={submit}>
                   <label htmlFor="stake">Віртуальна ставка</label>
                   <div className="input-wrap">

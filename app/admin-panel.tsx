@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { MAX_ADMIN_CREDIT, type AdminStats } from "../lib/admin";
+import { LEADERBOARD_PAGE_SIZE, MAX_ADMIN_CREDIT, type AdminStats } from "../lib/admin";
 import { ApiError, OFFLINE, request } from "./api-client";
 import { cash } from "./roulette";
 
@@ -16,15 +16,18 @@ export function AdminPanel({ onBalanceUpdated }: { onBalanceUpdated(): void }) {
   const [feedback, setFeedback] = useState("");
   const [error, setError] = useState("");
   const active = useRef(false);
+  const page = useRef(1);
   const value = Number(amount);
   const valid = Number.isSafeInteger(value) && value > 0 && value <= MAX_ADMIN_CREDIT;
 
-  async function refresh() {
+  async function refresh(nextPage = page.current) {
     if (active.current) return;
     active.current = true;
     setLoading(true);
     try {
-      setStats(await request<AdminStats>("/api/admin"));
+      const next = await request<AdminStats>("/api/admin?page=" + nextPage);
+      page.current = next.leaderboard.page;
+      setStats(next);
       setError("");
     } catch (failure) {
       setError(failure instanceof ApiError ? failure.message : OFFLINE);
@@ -99,17 +102,36 @@ export function AdminPanel({ onBalanceUpdated }: { onBalanceUpdated(): void }) {
       {error && <p className="notice error" role="alert">{error}</p>}
       {stats && (
         <div className="entries">
-          <h2>Найбільші чисті програші</h2>
-          {stats.losses.length > 0 ? (
-            <div className="entry-table">
-              <table>
-                <thead><tr><th scope="col">Гравець</th><th scope="col">Раунди</th><th scope="col">Програш</th></tr></thead>
-                <tbody>{stats.losses.map((row) => (
-                  <tr key={row.id}><th scope="row">{row.name}</th><td>{row.rounds}</td><td>{cash(row.netLoss)}</td></tr>
-                ))}</tbody>
-              </table>
-            </div>
-          ) : <p>Поки немає гравців із чистим програшем.</p>}
+          <h2>Рейтинг усіх користувачів</h2>
+          <p>Усього {stats.leaderboard.total} · за чистим результатом гри</p>
+          {stats.leaderboard.players.length > 0 ? (
+            <>
+              <div className="entry-table">
+                <table className="leaderboard">
+                  <thead><tr><th scope="col">№</th><th scope="col">Гравець</th><th scope="col">Раунди</th><th scope="col">Результат</th></tr></thead>
+                  <tbody>{stats.leaderboard.players.map((row, index) => (
+                    <tr key={row.id}>
+                      <td>{(stats.leaderboard.page - 1) * LEADERBOARD_PAGE_SIZE + index + 1}</td>
+                      <th scope="row">{row.name}</th>
+                      <td>{row.rounds}</td>
+                      <td className={row.net < 0 ? "leaderboard-loss" : row.net > 0 ? "chance" : undefined}>
+                        {row.net > 0 ? "+" : ""}{cash(row.net)}
+                      </td>
+                    </tr>
+                  ))}</tbody>
+                </table>
+              </div>
+              {stats.leaderboard.pages > 1 && (
+                <div className="admin-pagination" aria-label="Сторінки рейтингу">
+                  <button type="button" className="secondary" disabled={loading || crediting || stats.leaderboard.page === 1}
+                    onClick={() => void refresh(stats.leaderboard.page - 1)}>Назад</button>
+                  <span aria-live="polite">{stats.leaderboard.page} / {stats.leaderboard.pages}</span>
+                  <button type="button" className="secondary" disabled={loading || crediting || stats.leaderboard.page === stats.leaderboard.pages}
+                    onClick={() => void refresh(stats.leaderboard.page + 1)}>Далі</button>
+                </div>
+              )}
+            </>
+          ) : <p>Поки немає зареєстрованих користувачів.</p>}
         </div>
       )}
     </section>

@@ -8,7 +8,10 @@ export const dynamic = "force-dynamic";
 
 export async function GET(request: Request) {
   try {
-    return json(await getAdminStats(identifyAdmin(request)));
+    const player = identifyAdmin(request);
+    const page = Number(new URL(request.url).searchParams.get("page") ?? 1);
+    if (!Number.isSafeInteger(page) || page < 1) throw new GameError("Недійсний номер сторінки.", 400);
+    return json(await getAdminStats(player, page));
   } catch (error) {
     return apiFailure(error);
   }

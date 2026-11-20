@@ -201,10 +201,7 @@ h1 { font-size: clamp(1.6rem, 3vw, 2.25rem); line-height: 1.1; letter-spacing: -
 .pot span { color: #e0c6e0; font-size: .9rem; }
 .pot strong { font-size: 1.4rem; color: #fff; white-space: nowrap; }
 .bet-area { padding: 22px 28px 22px 12px; }
-.mode { margin-bottom: 14px; }
-.mode strong { color: #ffd0a8; font-size: .94rem; }
-.mode p, .notice { color: var(--muted); font-size: .86rem; }
-.mode p { margin-top: 3px; }
+.notice { color: var(--muted); font-size: .86rem; }
 .bet-area form { display: grid; gap: 8px; }
 .odds { display: flex; flex-wrap: wrap; gap: 4px 13px; color: var(--muted); font-size: .79rem; }
 .odds strong { color: var(--mint); white-space: nowrap; }
@@ -300,6 +297,10 @@ h1 { font-size: clamp(1.6rem, 3vw, 2.25rem); line-height: 1.1; letter-spacing: -
 .secondary { min-height: 42px; padding: 6px 10px; color: var(--ink); border: 1px solid var(--border); border-radius: 8px; background: #301b3b; }
 .admin-page tbody th { overflow-wrap: anywhere; }
 .admin-page tbody td { white-space: nowrap; }
+.leaderboard th:nth-child(2) { text-align: left; }
+.leaderboard-loss { color: #ffb3cc; }
+.admin-pagination { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 9px; }
+.admin-pagination span { color: var(--muted); font-variant-numeric: tabular-nums; }
 .tabs {
   position: fixed;
   z-index: 2;
@@ -352,8 +353,6 @@ h1 { font-size: clamp(1.6rem, 3vw, 2.25rem); line-height: 1.1; letter-spacing: -
   .wheel-area { padding: 13px 12px 6px; gap: 10px; }
   .wheel-frame { width: min(61vw, 226px); }
   .bet-area { padding: 6px 12px 13px; }
-  .mode { margin-bottom: 8px; }
-  .mode p { line-height: 1.34; font-size: .8rem; }
   .entries th, .entries td { padding: 8px 6px; }
   .entries tbody th, .entries td { font-size: .8rem; }
   .entries thead { font-size: .72rem; }

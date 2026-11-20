@@ -1,4 +1,5 @@
 export const MAX_ADMIN_CREDIT = 1_000_000;
+export const LEADERBOARD_PAGE_SIZE = 25;
 
 export type AdminStats = {
   played: number;
@@ -6,5 +7,10 @@ export type AdminStats = {
   netLoss: number;
   balance: number;
   pending: boolean;
-  losses: { id: string; name: string; rounds: number; netLoss: number }[];
+  leaderboard: {
+    page: number;
+    total: number;
+    pages: number;
+    players: { id: string; name: string; rounds: number; net: number }[];
+  };
 };
