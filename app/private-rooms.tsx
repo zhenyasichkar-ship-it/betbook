@@ -20,7 +20,12 @@ function RoomLobby({ onOpen, onBalanceChanged }: { onOpen(code: string): void; o
   const [invite, setInvite] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const creation = useRef<string | null>(null);
+  const [minimum, setMinimum] = useState("1");
+  const [maximum, setMaximum] = useState("1000");
+  const minStake = Number(minimum);
+  const maxStake = Number(maximum);
+  const validLimits = Number.isSafeInteger(minStake) && Number.isSafeInteger(maxStake) && minStake >= 1 && maxStake >= minStake;
+  const creation = useRef<{ action: "create"; requestId: string; minStake: number; maxStake: number } | null>(null);
   const active = useRef(false);
 
   async function load() {
@@ -33,14 +38,15 @@ function RoomLobby({ onOpen, onBalanceChanged }: { onOpen(code: string): void; o
   useEffect(() => { void load(); }, []);
 
   async function enter(action: "create" | "join") {
-    if (active.current) return;
+    if (active.current || (action === "create" && !validLimits)) return;
     active.current = true;
     setBusy(true);
     setError("");
     try {
-      const payload = action === "create"
-        ? { action, requestId: creation.current ??= crypto.randomUUID() }
-        : { action, code: invite };
+      if (action === "create" && (creation.current?.minStake !== minStake || creation.current?.maxStake !== maxStake)) {
+        creation.current = { action, requestId: crypto.randomUUID(), minStake, maxStake };
+      }
+      const payload = action === "create" ? creation.current! : { action, code: invite };
       const room = await request<{ code: string }>(route, payload);
       creation.current = null;
       onBalanceChanged();
@@ -58,7 +64,20 @@ function RoomLobby({ onOpen, onBalanceChanged }: { onOpen(code: string): void; o
     <section className="info-page rooms-lobby">
       <h1>Приватні кімнати</h1>
       <p>Поділися кодом із друзями. У кімнаті грають лише люди, і всі бачать один результат.</p>
-      <button type="button" className="primary" disabled={busy} onClick={() => void enter("create")}>Створити кімнату</button>
+      <form className="room-creation" onSubmit={(event) => { event.preventDefault(); void enter("create"); }}>
+        <div>
+          <label htmlFor="room-min">Мінімальна ставка ($)</label>
+          <div className="input-wrap"><input id="room-min" value={minimum} inputMode="numeric" autoComplete="off"
+            onChange={(event) => { if (/^\d{0,16}$/.test(event.target.value)) setMinimum(event.target.value); }} /></div>
+        </div>
+        <div>
+          <label htmlFor="room-max">Максимальна ставка ($)</label>
+          <div className="input-wrap"><input id="room-max" value={maximum} inputMode="numeric" autoComplete="off"
+            onChange={(event) => { if (/^\d{0,16}$/.test(event.target.value)) setMaximum(event.target.value); }} /></div>
+        </div>
+        {!validLimits && <p className="notice">Вкажи цілий мінімум від 1 $ і максимум, не менший за мінімум.</p>}
+        <button className="primary" disabled={busy || !validLimits}>Створити кімнату</button>
+      </form>
       <form onSubmit={(event) => { event.preventDefault(); void enter("join"); }}>
         <div>
           <label htmlFor="room-invite">Код запрошення</label>
@@ -89,6 +108,8 @@ function ActiveRoom({ code, onBack, onBalanceChanged }: { code: string; onBack()
   const [error, setError] = useState("");
   const [copyMessage, setCopyMessage] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [spin, setSpin] = useState<Round | null>(null);
   type RoomBet = { action: "bet"; round: number; stake: number; code: string; requestId: string };
   const [retry, setRetry] = useState<RoomBet | null>(null);
@@ -105,6 +126,7 @@ function ActiveRoom({ code, onBack, onBalanceChanged }: { code: string; onBack()
     offset.current = next.now - Date.now();
     setRoom(next);
     setClock(next.now);
+    if (!previous && (next.minStake > 10 || next.maxStake < 10)) setAmount(String(next.minStake));
     if (previous && next.balance !== previous.balance) onBalanceChanged();
     if (previous && next.latest?.winner && next.latest.number >= previous.number && next.number > previous.number) {
       setSpin({ ...next.latest, winner: next.latest.winner, stake: 0 });
@@ -123,6 +145,7 @@ function ActiveRoom({ code, onBack, onBalanceChanged }: { code: string; onBack()
       setError("");
     } catch (failure) {
       stopped.current = failure instanceof ApiError && (failure.status === 401 || failure.status === 404);
+      if (stopped.current) setRoom(null);
       setError(failure instanceof ApiError ? failure.message : OFFLINE);
     } finally {
       active.current = false;
@@ -148,10 +171,10 @@ function ActiveRoom({ code, onBack, onBalanceChanged }: { code: string; onBack()
   }, []);
 
   const stake = Number(amount);
-  const valid = Number.isSafeInteger(stake) && stake > 0;
+  const valid = Number.isSafeInteger(stake) && !!room && stake >= room.minStake && stake <= room.maxStake;
   const remaining = room ? Math.max(0, Math.ceil((room.endsAt - clock) / 1000)) : 0;
   const countdown = room ? Math.floor(remaining / 60) + ":" + String(remaining % 60).padStart(2, "0") : "—";
-  const locked = !room || !!room.stake || !remaining || !!spin || submitting;
+  const locked = !room || !!room.stake || !remaining || !!spin || submitting || deleting;
   const latest = room?.latest;
   const winner = latest?.participants.find((entry) => entry.id === latest.winner);
   const result = latest?.winner
@@ -187,6 +210,23 @@ function ActiveRoom({ code, onBack, onBalanceChanged }: { code: string; onBack()
     }
   }
 
+  async function removeRoom() {
+    if (active.current || !room?.canDelete) return;
+    active.current = true;
+    setDeleting(true);
+    setError("");
+    try {
+      await request<{ deleted: boolean }>(route, { action: "delete", code });
+      onBalanceChanged();
+      onBack();
+    } catch (failure) {
+      setError(failure instanceof ApiError ? failure.message : OFFLINE);
+    } finally {
+      setDeleting(false);
+      active.current = false;
+    }
+  }
+
   return (
     <>
       <section className="info-page room-invite">
@@ -194,7 +234,20 @@ function ActiveRoom({ code, onBack, onBalanceChanged }: { code: string; onBack()
           <button className="secondary" type="button" onClick={() => void copy()}>Копіювати код</button></div>
         <h1>Кімната <span>{code}</span></h1>
         <p>Учасники {room ? room.members + " / " + ROOM_LIMIT : "—"} · Для розіграшу потрібні дві ставки.</p>
+        {room && <p>Ліміти ставки {cash(room.minStake)} — {room.maxStake === Number.MAX_SAFE_INTEGER ? "без обмеження" : cash(room.maxStake)}</p>}
         {copyMessage && <p role="status">{copyMessage}</p>}
+        {room?.canDelete && (
+          <div className="room-actions">
+            {confirmDelete ? (
+              <>
+                <p>Кімната закриється для всіх. Ставки незавершеного раунду повернуться гравцям.</p>
+                <button className="secondary danger" type="button" disabled={submitting || deleting}
+                  onClick={() => void removeRoom()}>{deleting ? "Видаляємо…" : "Підтвердити видалення"}</button>
+                <button className="secondary" type="button" disabled={deleting} onClick={() => setConfirmDelete(false)}>Скасувати</button>
+              </>
+            ) : <button className="secondary danger" type="button" onClick={() => setConfirmDelete(true)}>Видалити кімнату</button>}
+          </div>
+        )}
       </section>
       <section className="arena">
         <div className="wheel-area">
@@ -207,18 +260,20 @@ function ActiveRoom({ code, onBack, onBalanceChanged }: { code: string; onBack()
             <label htmlFor="room-stake">Ставка · {room ? cash(room.balance) + " доступно" : "—"}</label>
             <div className="input-wrap">
               <input id="room-stake" inputMode="numeric" value={room?.stake ? String(room.stake) : amount}
-                disabled={locked || !!retry} onChange={(event) => { if (/^\d{0,15}$/.test(event.target.value)) setAmount(event.target.value); }} />
+                disabled={locked || !!retry} onChange={(event) => { if (/^\d{0,16}$/.test(event.target.value)) setAmount(event.target.value); }} />
               <span>$</span>
             </div>
             <div className="chips">
-              {[5, 10, 25].map((chip) => <button key={chip} type="button" disabled={locked || !!retry || chip > (room?.balance ?? 0)}
+              {[5, 10, 25].map((chip) => <button key={chip} type="button"
+                disabled={locked || !!retry || !room || chip > room.balance || chip < room.minStake || chip > room.maxStake}
                 onClick={() => setAmount(String(chip))}>{cash(chip)}</button>)}
             </div>
-            <button className="primary" disabled={!room || submitting || (!retry && (locked || !valid || stake > room.balance))}>
+            <button className="primary" disabled={!room || submitting || deleting || (!retry && (locked || !valid || stake > room.balance))}>
               {submitting ? "Приймаємо ставку…" : retry ? "Повторити запит" : room?.stake ? "Ставку прийнято" : "Зробити ставку"}
             </button>
           </form>
           {room && !room.stake && stake > room.balance && <p className="notice">Ставка перевищує баланс.</p>}
+          {room && !room.stake && amount && !valid && <p className="notice">Ставка має бути в межах лімітів кімнати.</p>}
           {error && <p className="notice error" role="alert">{error}</p>}
           {result && <p className="notice result" role="status">{result}</p>}
         </div>

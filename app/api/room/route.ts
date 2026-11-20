@@ -1,5 +1,5 @@
 import { apiFailure, json, requestIdPattern } from "../../../lib/api";
-import { betInRoom, createRoom, joinRoom, listRooms, openRoom } from "../../../lib/rooms";
+import { betInRoom, createRoom, deleteRoom, joinRoom, listRooms, openRoom } from "../../../lib/rooms";
 import { GameError, identify } from "../../../lib/telegram";
 
 export const runtime = "nodejs";
@@ -26,8 +26,15 @@ export async function POST(request: Request) {
     const player = identify(request);
     const data = await request.json().catch(() => null);
     if (data?.action === "join") return json(await joinRoom(roomCode(data.code), player));
+    if (data?.action === "delete") return json(await deleteRoom(roomCode(data.code), player));
     const validRequest = typeof data?.requestId === "string" && requestIdPattern.test(data.requestId);
-    if (data?.action === "create" && validRequest) return json(await createRoom(player, data.requestId));
+    if (data?.action === "create" && validRequest) {
+      const { minStake, maxStake } = data;
+      if (!Number.isSafeInteger(minStake) || !Number.isSafeInteger(maxStake) || minStake < 1 || maxStake < minStake) {
+        throw new GameError("Ліміти мають бути цілими числами. Максимум має бути не меншим за мінімум.", 400);
+      }
+      return json(await createRoom(player, data.requestId, { minStake, maxStake }));
+    }
     if (data?.action === "bet" && validRequest && Number.isSafeInteger(data.stake) && data.stake > 0
       && Number.isSafeInteger(data.round) && data.round > 0 && data.round <= 2_147_483_647) {
       return json(await betInRoom(roomCode(data.code), player, data));

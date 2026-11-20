@@ -1,21 +1,26 @@
 import { createHash, randomBytes } from "node:crypto";
 import type { PoolClient } from "pg";
 import { ROUND_MS, roundNumber, type Participant } from "./game";
-import { ROOM_LIMIT, type RoomResult, type RoomState, type RoomSummary } from "./room-types";
+import { ROOM_LIMIT, type RoomLimits, type RoomResult, type RoomState, type RoomSummary } from "./room-types";
 import { avatar, randomTicket, touchPlayer, transaction, type Bet } from "./store";
 import { GameError, type Player } from "./telegram";
 
 const colors = ["#ff75b9", "#56e8d7", "#ffae72", "#a78af8", "#63afff", "#ef8aeb", "#c8e668", "#f77a77", "#8be5ff", "#f8d589", "#b0f38c", "#a49aff"];
 const missingRoom = "Кімнату не знайдено або немає доступу.";
 type Seat = { telegram_id: string; display_name: string; stake: string };
+type RoomSettings = { owner_id: string; min_stake: string; max_stake: string; deleted_at: Date | null };
 
 function memberId(code: string, id: string) {
   return createHash("sha256").update(code + ":" + id).digest("hex").slice(0, 24);
 }
 
-async function lockRoom(db: PoolClient, code: string) {
-  const result = await db.query("SELECT 1 FROM private_rooms WHERE code = $1 FOR UPDATE", [code]);
-  if (!result.rowCount) throw new GameError(missingRoom, 404);
+async function lockRoom(db: PoolClient, code: string, includeDeleted = false) {
+  const { rows } = await db.query<RoomSettings>(
+    "SELECT owner_id, min_stake, max_stake, deleted_at FROM private_rooms WHERE code = $1 FOR UPDATE", [code]
+  );
+  const room = rows[0];
+  if (!room || (room.deleted_at && !includeDeleted)) throw new GameError(missingRoom, 404);
+  return room;
 }
 
 async function hasMember(db: PoolClient, code: string, id: string) {
@@ -79,7 +84,7 @@ async function settleRoom(db: PoolClient, code: string, current: number) {
   }
 }
 
-async function readRoom(db: PoolClient, code: string, player: Player, now: number): Promise<RoomState> {
+async function readRoom(db: PoolClient, code: string, player: Player, now: number, settings: RoomSettings): Promise<RoomState> {
   const number = roundNumber(now);
   const seats = await readSeats(db, code, number);
   const { pot, participants } = entries(code, seats);
@@ -90,6 +95,7 @@ async function readRoom(db: PoolClient, code: string, player: Player, now: numbe
   );
   return {
     code, now, number, endsAt: (number + 1) * ROUND_MS, participants, pot,
+    minStake: Number(settings.min_stake), maxStake: Number(settings.max_stake), canDelete: settings.owner_id === player.id,
     selfId: memberId(code, player.id),
     stake: Number(seats.find((seat) => seat.telegram_id === player.id)?.stake ?? 0),
     balance: Number(rows[0].balance), members: Number(rows[0].members), latest: rows[0].latest
@@ -100,25 +106,32 @@ export function listRooms(player: Player) {
   return transaction(async (db): Promise<{ rooms: RoomSummary[] }> => {
     const { rows } = await db.query<{ code: string; members: string }>(
       "SELECT r.code, (SELECT count(*) FROM private_members m WHERE m.code = r.code) AS members " +
-      "FROM private_members mine JOIN private_rooms r USING (code) WHERE mine.telegram_id = $1 " +
+      "FROM private_members mine JOIN private_rooms r USING (code) WHERE mine.telegram_id = $1 AND r.deleted_at IS NULL " +
       "ORDER BY r.created_at DESC, r.code", [player.id]
     );
     return { rooms: rows.map(({ code, members }) => ({ code, members: Number(members) })) };
   });
 }
 
-export function createRoom(player: Player, requestId: string) {
+export function createRoom(player: Player, requestId: string, limits: RoomLimits) {
   return transaction(async (db) => {
     await touchPlayer(db, player);
-    const existing = await db.query<{ code: string }>(
-      "SELECT code FROM private_rooms WHERE owner_id = $1 AND request_id = $2", [player.id, requestId]
+    const existing = await db.query<RoomSettings & { code: string }>(
+      "SELECT code, min_stake, max_stake, deleted_at FROM private_rooms WHERE owner_id = $1 AND request_id = $2", [player.id, requestId]
     );
-    if (existing.rows[0]) return existing.rows[0];
+    const previous = existing.rows[0];
+    if (previous) {
+      if (previous.deleted_at || Number(previous.min_stake) !== limits.minStake || Number(previous.max_stake) !== limits.maxStake) {
+        throw new GameError("Цей запит на створення кімнати вже використано.", 409);
+      }
+      return { code: previous.code };
+    }
     for (let attempt = 0; attempt < 3; attempt++) {
       const code = randomBytes(5).toString("hex").toUpperCase();
       const inserted = await db.query(
-        "INSERT INTO private_rooms (code, owner_id, request_id) VALUES ($1,$2,$3) ON CONFLICT (code) DO NOTHING RETURNING code",
-        [code, player.id, requestId]
+        "INSERT INTO private_rooms (code, owner_id, request_id, min_stake, max_stake) " +
+        "VALUES ($1,$2,$3,$4,$5) ON CONFLICT (code) DO NOTHING RETURNING code",
+        [code, player.id, requestId, limits.minStake, limits.maxStake]
       );
       if (!inserted.rowCount) continue;
       await db.query("INSERT INTO private_members (code, telegram_id) VALUES ($1,$2)", [code, player.id]);
@@ -128,13 +141,13 @@ export function createRoom(player: Player, requestId: string) {
   });
 }
 
-function withRoom<T>(code: string, player: Player, run: (db: PoolClient, now: number) => Promise<T>) {
+function withRoom<T>(code: string, player: Player, run: (db: PoolClient, now: number, settings: RoomSettings) => Promise<T>) {
   return transaction(async (db) => {
-    await lockRoom(db, code);
+    const settings = await lockRoom(db, code);
     if (!(await hasMember(db, code, player.id))) throw new GameError(missingRoom, 404);
     const now = Date.now();
     await settleRoom(db, code, roundNumber(now));
-    return run(db, now);
+    return run(db, now, settings);
   });
 }
 
@@ -152,11 +165,14 @@ export function joinRoom(code: string, player: Player) {
 }
 
 export function openRoom(code: string, player: Player) {
-  return withRoom(code, player, (db, now) => readRoom(db, code, player, now));
+  return withRoom(code, player, (db, now, settings) => readRoom(db, code, player, now, settings));
 }
 
 export function betInRoom(code: string, player: Player, bet: Bet) {
-  return withRoom(code, player, async (db) => {
+  return withRoom(code, player, async (db, _now, settings) => {
+    if (bet.stake < Number(settings.min_stake) || bet.stake > Number(settings.max_stake)) {
+      throw new GameError("Ставка виходить за межі лімітів кімнати.", 422);
+    }
     const saved = await db.query<{ number: number; stake: string }>(
       "SELECT number, stake FROM private_bets WHERE code = $1 AND telegram_id = $2 AND request_id = $3",
       [code, player.id, bet.requestId]
@@ -165,7 +181,7 @@ export function betInRoom(code: string, player: Player, bet: Bet) {
       if (saved.rows[0].number !== bet.round || Number(saved.rows[0].stake) !== bet.stake) {
         throw new GameError("Цей запит уже використано для іншої ставки.", 409);
       }
-      return readRoom(db, code, player, Date.now());
+      return readRoom(db, code, player, Date.now(), settings);
     }
     const wallet = await touchPlayer(db, player);
     const now = Date.now();
@@ -180,7 +196,34 @@ export function betInRoom(code: string, player: Player, bet: Bet) {
     await db.query("UPDATE players SET balance = balance - $2 WHERE telegram_id = $1", [player.id, bet.stake]);
     await db.query("INSERT INTO private_bets (code, number, telegram_id, stake, request_id) VALUES ($1,$2,$3,$4,$5)",
       [code, bet.round, player.id, bet.stake, bet.requestId]);
-    return readRoom(db, code, player, now);
+    return readRoom(db, code, player, now, settings);
+  });
+}
+
+export function deleteRoom(code: string, player: Player) {
+  return transaction(async (db) => {
+    const room = await lockRoom(db, code, true);
+    if (room.owner_id !== player.id) throw new GameError("Видалити кімнату може лише її власник.", 403);
+    if (room.deleted_at) return { deleted: true };
+    const current = roundNumber(Date.now());
+    await db.query(
+      "SELECT telegram_id FROM players WHERE telegram_id IN (" +
+      "SELECT b.telegram_id FROM private_bets b JOIN private_rounds r USING (code, number) " +
+      "WHERE r.code = $1 AND r.result IS NULL) ORDER BY telegram_id FOR UPDATE", [code]
+    );
+    await settleRoom(db, code, current);
+    await db.query(
+      "UPDATE players p SET balance = p.balance + refunds.total FROM (" +
+      "SELECT b.telegram_id, sum(b.stake)::bigint AS total FROM private_bets b JOIN private_rounds r USING (code, number) " +
+      "WHERE r.code = $1 AND r.result IS NULL GROUP BY b.telegram_id" +
+      ") refunds WHERE p.telegram_id = refunds.telegram_id", [code]
+    );
+    await db.query(
+      "UPDATE private_rounds SET result = jsonb_build_object('number', number, 'pot', 0, 'winner', NULL::text, 'participants', '[]'::jsonb) " +
+      "WHERE code = $1 AND result IS NULL", [code]
+    );
+    await db.query("UPDATE private_rooms SET deleted_at = now() WHERE code = $1", [code]);
+    return { deleted: true };
   });
 }
 
@@ -196,8 +239,8 @@ export async function settleExpiredRooms(playerId?: string) {
   });
   for (const { code } of rows) {
     await transaction(async (db) => {
-      await lockRoom(db, code);
-      await settleRoom(db, code, current);
+      const room = await lockRoom(db, code, true);
+      if (!room.deleted_at) await settleRoom(db, code, current);
     });
   }
   return rows.length === 8;

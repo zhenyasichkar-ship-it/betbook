@@ -297,8 +297,12 @@ h1 { font-size: clamp(1.6rem, 3vw, 2.25rem); line-height: 1.1; letter-spacing: -
 .secondary { min-height: 42px; padding: 6px 10px; color: var(--ink); border: 1px solid var(--border); border-radius: 8px; background: #301b3b; }
 .game-modes { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 8px; }
 .game-modes button[aria-pressed=true] { background: #4e2246; border-color: #ff8ccb66; }
-.rooms-lobby > .primary { margin-top: 12px; width: 100%; }
 .rooms-lobby form { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 8px; margin-top: 16px; }
+.rooms-lobby .room-creation { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.room-creation > .primary, .room-creation > p { grid-column: 1 / -1; }
+.room-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.room-actions p { flex-basis: 100%; }
+.secondary.danger { color: #ffb3cc; border-color: #ff8aae4d; }
 .rooms-lobby label { display: block; color: var(--muted); font-size: .85rem; margin-bottom: 5px; }
 .rooms-lobby .input-wrap input { padding-right: 12px; }
 .rooms-lobby form .secondary { min-height: 46px; }
