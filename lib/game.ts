@@ -7,7 +7,7 @@ const COLORS = ["#ac84fa", "#56e8d7", "#ffae72", "#63afff", "#ef8aeb", "#d5e973"
 export type Avatar = { name: string; color: string; avatar: number };
 type Contestant = Avatar & { id: string; stake: number };
 export type Participant = Contestant & { share: number; chance: number };
-export type RoundOffer = { number: number; endsAt: number; bots: Contestant[] };
+export type RoundOffer = { number: number; endsAt: number; bots: Contestant[]; live: boolean };
 export type Round = {
   number: number;
   winner: string;
@@ -43,20 +43,33 @@ export function legacyRoundNumber(now: number) {
   return Math.floor(now / 120_000);
 }
 
-export function roundOffer(number: number): RoundOffer {
+export function roundOffer(number: number, live = true): RoundOffer {
   const random = randomFor(number);
   const pool = [...NAMES];
-  const count = 8 + Math.floor(random() * 5);
+  const count = live ? 3 : 8 + Math.floor(random() * 5);
   const bots = COLORS.slice(0, count).map((color) => {
     const index = Math.floor(random() * pool.length);
     const [name] = pool.splice(index, 1);
     const id = NAMES.indexOf(name);
     return { id: "bot-" + id, name, avatar: Math.imul(id + 13, 0x7feb352d) >>> 0, color,
-      stake: 1 + Math.floor(random() * (number % 5 === 0 ? 20 : 6)) };
+      stake: live ? 18 + Math.floor(random() * 23) : 1 + Math.floor(random() * (number % 5 === 0 ? 20 : 6)) };
   });
-  return { number, endsAt: (number + 1) * ROUND_MS, bots };
+  return { number, endsAt: (number + 1) * ROUND_MS, bots, live };
 }
 
+export function liveOffer(offer: RoundOffer, playerStake: number, now: number): RoundOffer {
+  if (!offer.live) return offer;
+  const elapsed = Math.max(0, Math.min(ROUND_MS, now - offer.endsAt + ROUND_MS));
+  const supportedStake = Math.min(playerStake, Math.max(0, Number.MAX_SAFE_INTEGER - playerStake - 125));
+  const bots = offer.bots.map((bot, index) => {
+    const delay = 2500 * index;
+    const progress = Math.max(0, (elapsed - delay) / (ROUND_MS - delay));
+    const stage = Math.floor(progress ** 1.8 * 12) / 12;
+    const target = bot.stake + Math.floor(supportedStake * (0.19 + (bot.avatar % 14) / 100));
+    return { ...bot, stake: 2 + Math.floor((target - 2) * stage) };
+  });
+  return { ...offer, bots };
+}
 export function totalPot(offer: RoundOffer, stake: number) {
   return offer.bots.reduce((total, bot) => total + bot.stake, stake);
 }
@@ -91,7 +104,8 @@ export function resolveRound(offer: RoundOffer, stake: number, player: Avatar, d
 }
 
 export function botRound(number: number) {
-  const offer = roundOffer(number);
+  const base = roundOffer(number);
+  const offer = liveOffer(base, 0, base.endsAt);
   const ticket = Math.floor(randomFor(number ^ 0x51a537)() * totalPot(offer, 0));
   return resolveRound(offer, 0, { name: "", avatar: 0, color: "" }, ticket);
 }

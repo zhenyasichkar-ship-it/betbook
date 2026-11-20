@@ -40,7 +40,8 @@ export const SpinWheel = memo(function SpinWheel({ players, spin }: { players: P
     <div className="wheel-frame" aria-hidden="true">
       <div className="pointer" />
       <div key={spin?.number ?? "active"} className={"wheel-rotor" + (spin ? " spinning" : "")}
-        style={{ backgroundImage: "conic-gradient(" + gradient + ")", "--finish-angle": rotation + "deg" } as CSSProperties}>
+        style={{ backgroundImage: gradient ? "conic-gradient(" + gradient + ")" : undefined,
+          "--finish-angle": rotation + "deg" } as CSSProperties}>
         <div className="wheel-rings" />
         {sectors.map(({ participant, middle }) => {
           const radians = middle * Math.PI / 180;

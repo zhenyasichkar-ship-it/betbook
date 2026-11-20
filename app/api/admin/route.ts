@@ -1,6 +1,7 @@
 import { MAX_ADMIN_CREDIT } from "../../../lib/admin";
 import { apiFailure, json, requestIdPattern } from "../../../lib/api";
 import { addAdminCredits, getAdminStats } from "../../../lib/store";
+import { settleExpiredRooms } from "../../../lib/rooms";
 import { GameError, identifyAdmin } from "../../../lib/telegram";
 
 export const runtime = "nodejs";
@@ -11,7 +12,9 @@ export async function GET(request: Request) {
     const player = identifyAdmin(request);
     const page = Number(new URL(request.url).searchParams.get("page") ?? 1);
     if (!Number.isSafeInteger(page) || page < 1) throw new GameError("Недійсний номер сторінки.", 400);
-    return json(await getAdminStats(player, page));
+    const possiblyPendingRooms = await settleExpiredRooms();
+    const stats = await getAdminStats(player, page);
+    return json({ ...stats, pending: stats.pending || possiblyPendingRooms });
   } catch (error) {
     return apiFailure(error);
   }

@@ -295,6 +295,19 @@ h1 { font-size: clamp(1.6rem, 3vw, 2.25rem); line-height: 1.1; letter-spacing: -
 .admin-credit label { display: block; margin-bottom: 4px; color: var(--muted); }
 .admin-credit .primary { padding-inline: 9px; }
 .secondary { min-height: 42px; padding: 6px 10px; color: var(--ink); border: 1px solid var(--border); border-radius: 8px; background: #301b3b; }
+.game-modes { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 8px; }
+.game-modes button[aria-pressed=true] { background: #4e2246; border-color: #ff8ccb66; }
+.rooms-lobby > .primary { margin-top: 12px; width: 100%; }
+.rooms-lobby form { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 8px; margin-top: 16px; }
+.rooms-lobby label { display: block; color: var(--muted); font-size: .85rem; margin-bottom: 5px; }
+.rooms-lobby .input-wrap input { padding-right: 12px; }
+.rooms-lobby form .secondary { min-height: 46px; }
+.room-list { display: grid; gap: 6px; margin-top: 18px; }
+.room-list h2, .room-invite + .arena h2 { font-size: 1.05rem; }
+.room-list button, .room-invite-top { display: flex; justify-content: space-between; gap: 8px; }
+.room-invite { margin-bottom: 8px; }
+.room-invite h1 { margin-top: 12px; }
+.room-invite h1 span { color: var(--mint); user-select: all; overflow-wrap: anywhere; }
 .admin-page tbody th { overflow-wrap: anywhere; }
 .admin-page tbody td { white-space: nowrap; }
 .leaderboard th:nth-child(2) { text-align: left; }

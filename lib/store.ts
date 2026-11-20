@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomInt } from "node:crypto";
 import { Pool, type PoolClient } from "pg";
 import {
-  botRound, DAILY_BONUS, legacyRoundNumber, resolveRound, roundNumber, roundOffer, totalPot,
+  botRound, DAILY_BONUS, legacyRoundNumber, liveOffer, resolveRound, roundNumber, roundOffer, totalPot,
   type Avatar, type GameState, type Round
 } from "./game";
 import { GameError, isAdmin, type Player } from "./telegram";
@@ -19,13 +19,14 @@ type BetRow = {
   stake: string;
   return_factor: number | null;
   fair_odds: boolean;
+  live_bots: boolean;
 };
 export type Bet = { stake: number; round: number; requestId: string };
 
 const cache = globalThis as typeof globalThis & { betbookPool?: Pool };
 const playerFields = "balance, game_net, completed_rounds, to_char(last_bonus_day, 'YYYY-MM-DD') AS bonus_day";
 
-function randomTicket(pot: number) {
+export function randomTicket(pot: number) {
   if (pot < 2 ** 48) return randomInt(pot);
   const bound = BigInt(pot);
   const range = BigInt(1) << BigInt(64);
@@ -52,12 +53,12 @@ function pool() {
   return cache.betbookPool;
 }
 
-function avatar(player: Player): Avatar {
+export function avatar(player: Player): Avatar {
   const seed = createHash("sha256").update("betbook-avatar:" + player.id).digest().readUInt32BE();
   return { name: player.name, color: "#ff75b9", avatar: seed };
 }
 
-async function transaction<T>(run: (db: PoolClient) => Promise<T>): Promise<T> {
+export async function transaction<T>(run: (db: PoolClient) => Promise<T>): Promise<T> {
   const db = await pool().connect();
   let discard = false;
   try {
@@ -77,31 +78,37 @@ async function transaction<T>(run: (db: PoolClient) => Promise<T>): Promise<T> {
   }
 }
 
-function withPlayer<T>(player: Player, run: (db: PoolClient, row: PlayerRow, now: number) => Promise<T>) {
-  return transaction(async (db) => {
-    const result = await db.query<PlayerRow>(
+export async function touchPlayer(db: PoolClient, player: Player) {
+  const result = await db.query<PlayerRow>(
       "INSERT INTO players (telegram_id, display_name, balance, last_bonus_day) " +
       "VALUES ($1, $2, $3, (now() AT TIME ZONE 'Europe/Kyiv')::date) " +
       "ON CONFLICT (telegram_id) DO UPDATE SET display_name = EXCLUDED.display_name, " +
       "balance = players.balance + CASE WHEN players.last_bonus_day < EXCLUDED.last_bonus_day THEN $3 ELSE 0 END, " +
       "last_bonus_day = greatest(players.last_bonus_day, EXCLUDED.last_bonus_day) RETURNING " + playerFields,
-      [player.id, player.name, DAILY_BONUS]
-    );
+    [player.id, player.name, DAILY_BONUS]
+  );
+  return result.rows[0];
+}
+
+function withPlayer<T>(player: Player, run: (db: PoolClient, row: PlayerRow, now: number) => Promise<T>) {
+  return transaction(async (db) => {
+    const row = await touchPlayer(db, player);
     const now = Date.now();
-    return run(db, await settleBets(db, player, result.rows[0], now), now);
+    return run(db, await settleBets(db, player, row, now), now);
   });
 }
 
 async function settleBets(db: PoolClient, player: Player, row: PlayerRow, now: number) {
   const { rows } = await db.query<BetRow>(
-    "SELECT round_number, stake, return_factor, fair_odds FROM timed_bets " +
+    "SELECT round_number, stake, return_factor, fair_odds, live_bots FROM timed_bets " +
     "WHERE telegram_id = $1 AND result IS NULL AND round_number < $2 " +
     "AND (fair_odds OR round_number < $3) ORDER BY round_number",
     [player.id, roundNumber(now), legacyRoundNumber(now)]
   );
   for (const bet of rows) {
     const stake = Number(bet.stake);
-    const offer = roundOffer(bet.round_number);
+    const base = roundOffer(bet.round_number, bet.live_bots);
+    const offer = liveOffer(base, stake, base.endsAt);
     const draw = bet.fair_odds ? randomTicket(totalPot(offer, stake)) : randomInt(1_000_000_000) / 1_000_000_000;
     const result = resolveRound(offer, stake, { ...avatar(player), name: "Ви" }, draw,
       bet.fair_odds ? undefined : bet.return_factor);
@@ -127,8 +134,8 @@ function winCard(result: Round, key: string) {
 
 async function readState(db: PoolClient, player: Player, row: PlayerRow, now: number): Promise<GameState> {
   const number = roundNumber(now);
-  const current = await db.query<{ stake: string }>(
-    "SELECT stake FROM timed_bets WHERE telegram_id = $1 AND round_number = $2 AND fair_odds",
+  const current = await db.query<{ stake: string; live_bots: boolean }>(
+    "SELECT stake, live_bots FROM timed_bets WHERE telegram_id = $1 AND round_number = $2 AND fair_odds",
     [player.id, number]
   );
   const previous = await db.query<{ result: Round }>(
@@ -159,7 +166,7 @@ async function readState(db: PoolClient, player: Player, row: PlayerRow, now: nu
       bonusDay: row.bonus_day,
       isAdmin: isAdmin(player)
     },
-    offer: roundOffer(number),
+    offer: roundOffer(number, bet?.live_bots ?? true),
     bet: bet ? { stake: Number(bet.stake) } : null,
     feed,
     latest: lastBet?.number === number - 1 ? lastBet : previousBotRound,
@@ -265,7 +272,9 @@ export function placeBet(player: Player, bet: Bet) {
     );
     if (current.rowCount) throw new GameError("Ви вже зробили ставку в цьому раунді.", 409);
     if (bet.stake > Number(row.balance)) throw new GameError("Недостатньо віртуальних коштів.", 422);
-    if (!Number.isSafeInteger(Number(row.balance) + totalPot(roundOffer(bet.round), 0))) {
+    const base = roundOffer(bet.round);
+    const bots = liveOffer(base, bet.stake, base.endsAt);
+    if (!Number.isSafeInteger(Number(row.balance) + totalPot(bots, 0))) {
       throw new GameError("Досягнуто ліміту балансу.", 422);
     }
     const updated = await db.query<PlayerRow>(
@@ -273,7 +282,7 @@ export function placeBet(player: Player, bet: Bet) {
       [player.id, bet.stake]
     );
     await db.query(
-      "INSERT INTO timed_bets (telegram_id, round_number, request_id, stake, fair_odds) VALUES ($1, $2, $3, $4, true)",
+      "INSERT INTO timed_bets (telegram_id, round_number, request_id, stake, fair_odds, live_bots) VALUES ($1, $2, $3, $4, true, true)",
       [player.id, bet.round, bet.requestId, bet.stake]
     );
     return readState(db, player, updated.rows[0], now);

@@ -1,10 +1,11 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import { DAILY_BONUS, lineup, roundOffer, totalPot, type GameState, type Round } from "../lib/game";
+import { DAILY_BONUS, lineup, liveOffer, roundOffer, totalPot, type GameState, type Round } from "../lib/game";
 import { AvatarBadge, BotFeed, SpinWheel, cash, percent } from "./roulette";
 import { ApiError, OFFLINE, request } from "./api-client";
 import { AdminPanel } from "./admin-panel";
+import { PrivateRooms } from "./private-rooms";
 
 type Tab = "wheel" | "profile" | "credits" | "admin";
 type Bet = { round: number; stake: number; requestId: string };
@@ -29,6 +30,7 @@ const credits = [
 
 export default function Betbook() {
   const [tab, setTab] = useState<Tab>("wheel");
+  const [roomMode, setRoomMode] = useState(false);
   const [state, setState] = useState<GameState | null>(null);
   const [clock, setClock] = useState(0);
   const [amount, setAmount] = useState("10");
@@ -103,8 +105,10 @@ export default function Betbook() {
   const stake = Number(amount);
   const validStake = Number.isSafeInteger(stake) && stake > 0;
   const placed = state?.bet?.stake ?? 0;
-  const participants = useMemo(() => lineup(offer, placed, player), [offer, placed, player]);
-  const estimated = useMemo(() => validStake ? lineup(offer, stake, player)[0] : null, [offer, player, stake, validStake]);
+  const currentOffer = useMemo(() => liveOffer(offer, placed, clock), [offer, placed, clock]);
+  const participants = useMemo(() => lineup(currentOffer, placed, player), [currentOffer, placed, player]);
+  const estimated = useMemo(() => validStake ? lineup(liveOffer(offer, stake, offer.endsAt), stake, player)[0] : null,
+    [offer, player, stake, validStake]);
   const remaining = state ? Math.max(0, Math.ceil((offer.endsAt - clock) / 1000)) : 0;
   const countdown = state ? Math.floor(remaining / 60) + ":" + String(remaining % 60).padStart(2, "0") : "—";
   const locked = !state || submitting || !!spin || !!placed || remaining === 0;
@@ -152,6 +156,11 @@ export default function Betbook() {
               <div><strong>Привіт! Тримай свій бонус</strong><p>{state ? "Сьогодні зараховано." : "Щодня при вході в застосунок."}</p></div>
               <span>{ "+" + cash(DAILY_BONUS)}</span>
             </section>
+            <div className="game-modes" role="group" aria-label="Режим рулетки">
+              <button type="button" className="secondary" aria-pressed={!roomMode} onClick={() => setRoomMode(false)}>З ботами</button>
+              <button type="button" className="secondary" aria-pressed={roomMode} onClick={() => setRoomMode(true)}>З друзями</button>
+            </div>
+            {roomMode ? <PrivateRooms onBalanceChanged={() => void refresh()} /> : <>
             <BotFeed feed={state?.feed ?? []} />
             <section className="arena" aria-labelledby="arena-title">
               <div className="wheel-area">
@@ -160,7 +169,7 @@ export default function Betbook() {
                   <div className="countdown"><span>{spin ? "Розіграш" : "До розіграшу"}</span><strong>{countdown}</strong></div>
                 </div>
                 <SpinWheel players={participants} spin={spin} />
-                <div className="pot"><span>Банк раунду</span><strong>{cash(spin?.pot ?? totalPot(offer, placed))}</strong></div>
+                <div className="pot"><span>Банк раунду</span><strong>{cash(spin?.pot ?? totalPot(currentOffer, placed))}</strong></div>
               </div>
               <div className="bet-area">
                 <form onSubmit={submit}>
@@ -180,7 +189,7 @@ export default function Betbook() {
                       onClick={() => setAmount(String(balance))}>Увесь баланс</button>
                   </div>
                   {estimated && state && !placed && (
-                    <p className="odds"><span>Частка банку <strong>{percent(estimated.share)}</strong></span><span>Шанс <strong>{percent(estimated.chance)}</strong></span></p>
+                    <p className="odds"><span>На момент розіграшу</span><span>Частка <strong>{percent(estimated.share)}</strong></span><span>Шанс <strong>{percent(estimated.chance)}</strong></span></p>
                   )}
                   <button className="primary" disabled={submitting || (!retry && (locked || !validStake || stake > balance))}>
                     {submitting ? "Приймаємо ставку…" : retry ? "Повторити запит" : placed ? "Ставку прийнято" : "Зробити ставку"}
@@ -195,7 +204,7 @@ export default function Betbook() {
             </section>
             <section className="entries" aria-labelledby="entries-title">
               <h2 id="entries-title">Учасники раунду</h2>
-              <p>Вузькі сектори розширено для аватарок. Точні частки в таблиці.</p>
+              <p>Боти додають ставки до кінця раунду. У таблиці показано поточний банк і частки.</p>
               <div className="entry-table">
                 <table>
                   <thead><tr><th>Гравець</th><th>Ставка</th><th>Частка банку</th><th>Шанс</th></tr></thead>
@@ -214,6 +223,7 @@ export default function Betbook() {
                 </table>
               </div>
             </section>
+            </>}
           </>
         )}
         {tab === "profile" && (

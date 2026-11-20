@@ -1,13 +1,16 @@
 import { openGame, placeBet, type Bet } from "../../../lib/store";
 import { GameError, identify } from "../../../lib/telegram";
 import { apiFailure, json, requestIdPattern } from "../../../lib/api";
+import { settleExpiredRooms } from "../../../lib/rooms";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET(request: Request) {
   try {
-    return json(await openGame(identify(request)));
+    const player = identify(request);
+    await settleExpiredRooms(player.id);
+    return json(await openGame(player));
   } catch (error) {
     return apiFailure(error);
   }
@@ -25,6 +28,7 @@ export async function POST(request: Request) {
       throw new GameError("Вкажіть ставку цілим числом від 1 віртуального $.", 400);
     }
     const bet = { stake: value.stake, round: value.round, requestId: value.requestId };
+    await settleExpiredRooms(player.id);
     return json(await placeBet(player, bet));
   } catch (error) {
     return apiFailure(error);
