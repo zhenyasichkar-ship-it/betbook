@@ -6,7 +6,7 @@ import {
 } from "./game";
 import { GameError, isAdmin, type Player } from "./telegram";
 import { LEADERBOARD_PAGE_SIZE, type AdminStats } from "./admin";
-import { DAILY_DEPOSIT_LIMIT, type DepositState, type PublicStats } from "./deposits";
+import { DEPOSIT_COOLDOWN_MS, MAX_DEPOSIT, type DepositClaim, type DepositState, type PublicStats } from "./deposits";
 
 type PlayerRow = {
   balance: string;
@@ -85,8 +85,8 @@ export async function transaction<T>(run: (db: PoolClient) => Promise<T>): Promi
 
 export async function touchPlayer(db: PoolClient, player: Player) {
   const result = await db.query<PlayerRow>(
-      "INSERT INTO players (telegram_id, display_name, balance, last_bonus_day) " +
-      "VALUES ($1, $2, $3, (now() AT TIME ZONE 'Europe/Kyiv')::date) " +
+      "INSERT INTO players (telegram_id, display_name, balance, last_bonus_day, welcome_granted_at) " +
+      "VALUES ($1, $2, $3, (now() AT TIME ZONE 'Europe/Kyiv')::date, clock_timestamp()) " +
       "ON CONFLICT (telegram_id) DO UPDATE SET display_name = EXCLUDED.display_name RETURNING " + playerFields,
     [player.id, player.name, DAILY_BONUS]
   );
@@ -227,41 +227,39 @@ export function getAdminStats(player: Player, requestedPage: number) {
   });
 }
 
-const kyivDay = "(now() AT TIME ZONE 'Europe/Kyiv')::date";
-
 async function readDeposit(db: PoolClient, player: Player, row: PlayerRow): Promise<DepositState> {
-  const { rows } = await db.query<{ available: boolean; deposited: string }>(
-    "SELECT $2::date < " + kyivDay + " AS available, coalesce(sum(amount), 0) AS deposited " +
-    "FROM virtual_deposits WHERE telegram_id = $1 AND deposit_day = " + kyivDay,
-    [player.id, row.bonus_day]
+  const { rows } = await db.query<{ now_ms: string; last_ms: string | null }>(
+    "SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint AS now_ms, " +
+    "ceil(extract(epoch FROM greatest(welcome_granted_at, (SELECT claimed_at FROM hourly_virtual_deposits " +
+    "WHERE telegram_id = $1 ORDER BY claimed_at DESC LIMIT 1))) * 1000)::bigint AS last_ms " +
+    "FROM players WHERE telegram_id = $1", [player.id]
   );
-  const remaining = rows[0].available ? Math.max(0, DAILY_DEPOSIT_LIMIT - Number(rows[0].deposited)) : 0;
-  return { balance: Number(row.balance), remaining };
+  const now = Number(rows[0].now_ms);
+  const availableAt = rows[0].last_ms === null ? now : Number(rows[0].last_ms) + DEPOSIT_COOLDOWN_MS;
+  return { balance: Number(row.balance), now, availableAt };
 }
 
 export function getDeposit(player: Player) {
   return withPlayer(player, (db, row) => readDeposit(db, player, row));
 }
 
-export function deposit(player: Player, amount: number, requestId: string) {
-  return withPlayer(player, async (db, row) => {
+export function deposit(player: Player, requestId: string) {
+  return withPlayer(player, async (db, row): Promise<DepositClaim> => {
     const current = await readDeposit(db, player, row);
     const { rows } = await db.query<{ amount: number }>(
-      "SELECT amount FROM virtual_deposits WHERE telegram_id = $1 AND request_id = $2", [player.id, requestId]
+      "SELECT amount FROM hourly_virtual_deposits WHERE telegram_id = $1 AND request_id = $2", [player.id, requestId]
     );
-    if (rows[0]) {
-      if (rows[0].amount !== amount) throw new GameError("Цей запит уже використано для іншої суми.", 409);
-      return current;
-    }
-    if (amount === 0) return current;
-    if (amount > current.remaining) throw new GameError("Сума перевищує залишок денного ліміту.", 422);
-    if (!Number.isSafeInteger(current.balance + amount)) throw new GameError("Досягнуто ліміту балансу.", 422);
+    if (rows[0]) return { ...current, awarded: rows[0].amount };
+    if (current.now < current.availableAt) throw new GameError("Наступне поповнення ще недоступне.", 429);
+    if (!Number.isSafeInteger(current.balance + MAX_DEPOSIT)) throw new GameError("Досягнуто ліміту балансу.", 422);
+    const awarded = randomInt(MAX_DEPOSIT + 1);
     await db.query(
-      "INSERT INTO virtual_deposits (telegram_id, request_id, deposit_day, amount) VALUES ($1,$2," + kyivDay + ",$3)",
-      [player.id, requestId, amount]
+      "INSERT INTO hourly_virtual_deposits (telegram_id, request_id, claimed_at, amount) " +
+      "VALUES ($1,$2,to_timestamp($3::double precision / 1000),$4)",
+      [player.id, requestId, current.now, awarded]
     );
-    await db.query("UPDATE players SET balance = balance + $2 WHERE telegram_id = $1", [player.id, amount]);
-    return { balance: current.balance + amount, remaining: current.remaining - amount };
+    await db.query("UPDATE players SET balance = balance + $2 WHERE telegram_id = $1", [player.id, awarded]);
+    return { balance: current.balance + awarded, now: current.now, availableAt: current.now + DEPOSIT_COOLDOWN_MS, awarded };
   });
 }
 

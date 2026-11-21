@@ -7,7 +7,7 @@ import { AvatarBadge, BotFeed, SpinWheel, cash, percent } from "./roulette";
 import { ApiError, OFFLINE, request } from "./api-client";
 import { AdminPanel } from "./admin-panel";
 import { PrivateRooms } from "./private-rooms";
-import { HelpStats, WalletDeposit } from "./player-info";
+import { CasinoStats, WalletDeposit } from "./player-info";
 
 type Tab = "wheel" | "profile" | "help" | "admin";
 type Bet = { round: number; stake: number; requestId: string; mode: RouletteMode };
@@ -174,10 +174,11 @@ export default function Betbook() {
         </a>
         <div className="wallet"><span>Віртуальний баланс</span><strong>{state ? cash(balance) : "—"}</strong></div>
       </header>
+      <CasinoStats />
       <main>
         {tab === "wheel" && (
           <>
-            <WalletDeposit onDeposit={() => void refresh()} />
+            <WalletDeposit ready={!!state} onDeposit={() => void refresh()} />
             <div className="game-modes" role="group" aria-label="Режим рулетки">
               <button type="button" className="secondary" aria-pressed={!roomMode} onClick={() => setRoomMode(false)}>З ботами</button>
               <button type="button" className="secondary" aria-pressed={roomMode} onClick={() => setRoomMode(true)}>З друзями</button>
@@ -276,7 +277,6 @@ export default function Betbook() {
           <section className="info-page">
             <h1>Довідка</h1>
             {helpText.map((part) => <p className="credits-copy" key={part}>{part}</p>)}
-            <HelpStats />
           </section>
         )}
         {tab === "admin" && isAdmin && <AdminPanel onBalanceUpdated={() => void refresh()} />}
