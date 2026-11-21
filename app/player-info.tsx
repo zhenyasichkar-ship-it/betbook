@@ -112,17 +112,22 @@ export function CasinoStats() {
     };
   }, []);
 
+  const houseText = stats ? (stats.houseNet > 0 ? "+" : "") + cash(stats.houseNet) : "—";
   return (
     <section className="help-casino" aria-label="Статистика казино">
       <dl>
         <div><dt>Поповнення гравців</dt><dd>{stats ? cash(stats.deposited) : "—"}</dd></div>
         <div><dt>Програно гравцями</dt><dd>{stats ? cash(stats.lost) : "—"}</dd></div>
+        <div><dt>Виграно гравцями</dt><dd>{stats ? cash(stats.won) : "—"}</dd></div>
         <div className="help-casino-net" data-result={stats && stats.houseNet < 0 ? "loss" : undefined}>
           <dt>Чистий результат казино</dt>
-          <dd>{stats ? (stats.houseNet > 0 ? "+" : "") + cash(stats.houseNet) : "—"}</dd>
+          <dd>
+            <span className="help-casino-value" key={houseText}>{houseText}</span>
+            {stats && <span className="help-casino-equation">{cash(stats.lost)} програно − {cash(stats.won)} виграно</span>}
+          </dd>
         </div>
       </dl>
-      <p>Усі суми у віртуальних доларах після останнього скидання. Ігрові суми враховують раунди з ботами.</p>
+      <p>Віртуальні $. Поповнення включають бонуси та залишки на момент скидання. Виграші й програші — чистий підсумок кожного гравця після скидання.</p>
     </section>
   );
 }

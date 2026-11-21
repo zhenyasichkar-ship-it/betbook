@@ -265,27 +265,34 @@ export function deposit(player: Player, requestId: string) {
 
 export function getPublicStats() {
   return transaction(async (db): Promise<PublicStats> => {
-    const { rows } = await db.query<{ played: string; house_net: string; deposited: string; lost: string }>(
+    const { rows } = await db.query<{ played: string; house_net: string; deposited: string; lost: string; won: string }>(
       "WITH period AS (SELECT coalesce((SELECT started_at FROM help_statistics_reset), '-infinity'::timestamptz) AS cutoff), " +
-      "bot_rounds AS (" +
-      "SELECT telegram_id, stake - CASE WHEN winner = 'player' THEN pot ELSE 0 END AS net, " +
-      "CASE WHEN winner <> 'player' THEN stake ELSE 0 END AS lost " +
+      "round_results AS (" +
+      "SELECT telegram_id, CASE WHEN winner = 'player' THEN pot ELSE 0 END - stake AS net " +
       "FROM timed_bets, period WHERE result IS NOT NULL AND telegram_id > 0 " +
       "AND to_timestamp((round_number + 1)::double precision * CASE WHEN fair_odds THEN 60 ELSE 120 END) > cutoff " +
-      "UNION ALL SELECT telegram_id, coalesce((result->>'stake')::bigint, 0) - CASE WHEN winner = 'player' THEN pot ELSE 0 END, " +
-      "CASE WHEN winner <> 'player' THEN coalesce((result->>'stake')::bigint, 0) ELSE 0 END " +
-      "FROM rounds, period WHERE telegram_id > 0 AND played_at > cutoff), " +
-      "played_since_reset AS (SELECT telegram_id FROM bot_rounds UNION " +
-      "SELECT b.telegram_id FROM private_bets b JOIN private_rounds r USING (code, number), period " +
+      "UNION ALL SELECT telegram_id, CASE WHEN winner = 'player' THEN pot ELSE 0 END - coalesce((result->>'stake')::bigint, 0) " +
+      "FROM rounds, period WHERE telegram_id > 0 AND played_at > cutoff " +
+      // Recreate the public member ID recorded in a room result.
+      "UNION ALL SELECT b.telegram_id, (CASE WHEN r.result->>'winner' = " +
+      "left(encode(sha256(convert_to(b.code || ':' || b.telegram_id::text, 'UTF8')), 'hex'), 24) " +
+      "THEN (r.result->>'pot')::bigint ELSE 0 END) - b.stake " +
+      "FROM private_bets b JOIN private_rounds r USING (code, number), period " +
       "WHERE b.telegram_id > 0 AND r.result->>'winner' IS NOT NULL AND to_timestamp((r.number + 1)::double precision * 60) > cutoff), " +
-      "deposits AS (SELECT amount FROM hourly_virtual_deposits, period WHERE telegram_id > 0 AND claimed_at > cutoff " +
-      "UNION ALL SELECT amount FROM virtual_deposits, period WHERE telegram_id > 0 " +
-      "AND deposit_day > (cutoff AT TIME ZONE 'Europe/Kyiv')::date) " +
-      "SELECT (SELECT count(*) FROM played_since_reset) AS played, (SELECT coalesce(sum(amount), 0) FROM deposits) AS deposited, " +
-      "coalesce(sum(net), 0) AS house_net, coalesce(sum(lost), 0) AS lost FROM bot_rounds"
+      "player_results AS (SELECT telegram_id, sum(net) AS net FROM round_results GROUP BY telegram_id), " +
+      "reserved_stakes AS (SELECT telegram_id, stake FROM timed_bets WHERE result IS NULL " +
+      "UNION ALL SELECT b.telegram_id, b.stake FROM private_bets b JOIN private_rounds r USING (code, number) WHERE r.result IS NULL), " +
+      "reservations AS (SELECT telegram_id, sum(stake) AS stake FROM reserved_stakes GROUP BY telegram_id), " +
+      // Restoring reserved stakes and undoing this period's game result gives opening balance plus all credits.
+      "funds AS (SELECT p.balance + coalesce(held.stake, 0) - coalesce(score.net, 0) AS funding, " +
+      "coalesce(score.net, 0) AS net FROM players p LEFT JOIN player_results score USING (telegram_id) " +
+      "LEFT JOIN reservations held USING (telegram_id) WHERE p.telegram_id > 0) " +
+      "SELECT (SELECT count(*) FROM player_results) AS played, coalesce(sum(funding), 0) AS deposited, " +
+      "coalesce(sum(greatest(-net, 0)), 0) AS lost, coalesce(sum(greatest(net, 0)), 0) AS won, " +
+      "coalesce(sum(-net), 0) AS house_net FROM funds"
     );
-    const { played, house_net, deposited, lost } = rows[0];
-    return { played: Number(played), houseNet: Number(house_net), deposited: Number(deposited), lost: Number(lost) };
+    const { played, house_net, deposited, lost, won } = rows[0];
+    return { played: Number(played), houseNet: Number(house_net), deposited: Number(deposited), lost: Number(lost), won: Number(won) };
   });
 }
 

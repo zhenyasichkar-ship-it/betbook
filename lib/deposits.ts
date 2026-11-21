@@ -14,4 +14,5 @@ export type PublicStats = {
   houseNet: number;
   deposited: number;
   lost: number;
+  won: number;
 };
