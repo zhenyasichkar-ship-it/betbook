@@ -1,19 +1,20 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import { DAILY_BONUS, lineup, liveOffer, roundOffer, totalPot, type GameState, type Round } from "../lib/game";
+import { DAILY_BONUS, DEFAULT_MODE, lineup, liveOffer, ROULETTE_MODES, roundOffer, totalPot,
+  type GameState, type RouletteMode, type Round } from "../lib/game";
 import { AvatarBadge, BotFeed, SpinWheel, cash, percent } from "./roulette";
 import { ApiError, OFFLINE, request } from "./api-client";
 import { AdminPanel } from "./admin-panel";
 import { PrivateRooms } from "./private-rooms";
 
-type Tab = "wheel" | "profile" | "credits" | "admin";
-type Bet = { round: number; stake: number; requestId: string };
-const PLACEHOLDER = roundOffer(1);
+type Tab = "wheel" | "profile" | "help" | "admin";
+type Bet = { round: number; stake: number; requestId: string; mode: RouletteMode };
+const modes = Object.keys(ROULETTE_MODES) as RouletteMode[];
 const GUEST = { name: "Ви", avatar: 1, color: "#ff75b9" };
 
-function requestGame(bet?: Bet) {
-  return request<GameState>("/api/game", bet);
+function requestGame(mode: RouletteMode, bet?: Bet) {
+  return request<GameState>("/api/game?mode=" + mode, bet);
 }
 
 function resultMessage(round: Round) {
@@ -23,14 +24,17 @@ function resultMessage(round: Round) {
     (round.stake ? " Ви втратили " + cash(round.stake) + "." : "");
 }
 
-const credits = [
-  "Програма була розроблена студентами ФКНК КНУ групи ІПС-11\nСічкарем Євгеном\nГавриленком Денисом\nта Антоненко Іваном",
-  'в участі в активності "майже хакатон" та в навчальних цілях\nПрограма не пов\'язана з реальним казино та гемблінгом, всі співпадіння випадкові, стиль за основу взятий з гри GTA6\nБажаємо всім здоровя та удачі'
+const helpText = [
+  "Програма була розроблена студентами ФКНК КНУ групи ІПС-11\nСічкарем Євгеном\nГавриленком Денисом\nАнтоненко Іваном",
+  'В участі в активності "майже хакатон" та в навчальних цілях\nПрограма не закликає до участі в реальних азартних іграх та не пов\'язана з реальним казино та гемблінгом, всі співпадіння випадкові, стиль за основу взятий з гри GTA6',
+  "Бажаємо всім здоров'я та удачі"
 ];
 
 export default function Betbook() {
   const [tab, setTab] = useState<Tab>("wheel");
   const [roomMode, setRoomMode] = useState(false);
+  const [mode, setMode] = useState<RouletteMode>(DEFAULT_MODE);
+  const selectedMode = useRef<RouletteMode>(DEFAULT_MODE);
   const [state, setState] = useState<GameState | null>(null);
   const [clock, setClock] = useState(0);
   const [amount, setAmount] = useState("10");
@@ -51,7 +55,7 @@ export default function Betbook() {
     timeOffset.current = next.now - Date.now();
     setClock(next.now);
     setState(next);
-    if (previous && previous.offer.number < next.offer.number && !document.hidden) {
+    if (previous?.offer.mode === next.offer.mode && previous.offer.number < next.offer.number && !document.hidden) {
       window.clearTimeout(spinTimeout.current);
       setSpin(next.latest);
       const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -63,11 +67,15 @@ export default function Betbook() {
     if (requestActive.current) return;
     requestActive.current = true;
     lastRefresh.current = Date.now();
+    const requestedMode = selectedMode.current;
     try {
-      applyState(await requestGame());
+      const next = await requestGame(requestedMode);
+      if (requestedMode !== selectedMode.current) return;
+      applyState(next);
       requiresTelegram.current = false;
       setError("");
     } catch (failure) {
+      if (requestedMode !== selectedMode.current) return;
       requiresTelegram.current = failure instanceof ApiError && failure.status === 401;
       setError(failure instanceof ApiError ? failure.message : OFFLINE);
     } finally {
@@ -99,34 +107,50 @@ export default function Betbook() {
     };
   }, []);
 
-  const offer = state?.offer ?? PLACEHOLDER;
+  const game = state?.offer.mode === mode ? state : null;
+  const offer = useMemo(() => game?.offer ?? roundOffer(1, true, mode), [game, mode]);
+  const { min, max, presets } = ROULETTE_MODES[mode];
   const player = useMemo(() => state ? { ...state.profile, name: "Ви" } : GUEST, [state]);
   const balance = state?.profile.balance ?? 0;
   const stake = Number(amount);
-  const validStake = Number.isSafeInteger(stake) && stake > 0;
-  const placed = state?.bet?.stake ?? 0;
-  const currentOffer = useMemo(() => liveOffer(offer, placed, clock), [offer, placed, clock]);
+  const validStake = Number.isSafeInteger(stake) && stake >= min && stake <= max;
+  const placed = game?.bet?.stake ?? 0;
+  const placedAt = game?.bet?.placedAt;
+  const currentOffer = useMemo(() => game ? liveOffer(offer, placed, clock, placedAt) : { ...offer, bots: [] },
+    [game, offer, placed, clock, placedAt]);
   const participants = useMemo(() => lineup(currentOffer, placed, player), [currentOffer, placed, player]);
-  const estimated = useMemo(() => validStake ? lineup(liveOffer(offer, stake, offer.endsAt), stake, player)[0] : null,
-    [offer, player, stake, validStake]);
-  const remaining = state ? Math.max(0, Math.ceil((offer.endsAt - clock) / 1000)) : 0;
-  const countdown = state ? Math.floor(remaining / 60) + ":" + String(remaining % 60).padStart(2, "0") : "—";
-  const locked = !state || submitting || !!spin || !!placed || remaining === 0;
+  const estimated = validStake && clock < offer.endsAt ? lineup(liveOffer(offer, stake, offer.endsAt, clock), stake, player)[0] : null;
+  const remaining = game ? Math.max(0, Math.ceil((offer.endsAt - clock) / 1000)) : 0;
+  const countdown = game ? Math.floor(remaining / 60) + ":" + String(remaining % 60).padStart(2, "0") : "—";
+  const locked = !game || submitting || !!spin || !!placed || remaining === 0;
   const lastBet = state?.lastBet;
   const isAdmin = !!state?.profile.isAdmin;
-  const tabs: [Tab, string, string][] = [["wheel", "Рулетка", "◉"], ["profile", "Профіль", "♙"], ["credits", "Кредити", "✦"]];
+  const tabs: [Tab, string, string][] = [["wheel", "Рулетка", "◉"], ["profile", "Профіль", "♙"], ["help", "Довідка", "✦"]];
   if (isAdmin) tabs.push(["admin", "Адмінка", "⚙"]);
+
+  function changeMode(next: RouletteMode) {
+    if (next === selectedMode.current || submitting || retry) return;
+    selectedMode.current = next;
+    setMode(next);
+    setAmount(String(ROULETTE_MODES[next].min));
+    setError("");
+    setSpin(null);
+    window.clearTimeout(spinTimeout.current);
+    requiresTelegram.current = false;
+    lastRefresh.current = 0;
+    void refresh();
+  }
 
   async function submit(event: FormEvent) {
     event.preventDefault();
-    if (requestActive.current || !state || (!retry && (locked || !validStake || stake > balance))) return;
+    if (requestActive.current || !game || (!retry && (locked || !validStake || stake > balance))) return;
     requestActive.current = true;
-    const bet = retry ?? { round: offer.number, stake, requestId: crypto.randomUUID() };
+    const bet = retry ?? { round: offer.number, stake, requestId: crypto.randomUUID(), mode };
     setRetry(bet);
     setSubmitting(true);
     setError("");
     try {
-      applyState(await requestGame(bet));
+      applyState(await requestGame(bet.mode, bet));
       setRetry(null);
     } catch (failure) {
       if (failure instanceof ApiError && failure.status < 500) {
@@ -161,7 +185,15 @@ export default function Betbook() {
               <button type="button" className="secondary" aria-pressed={roomMode} onClick={() => setRoomMode(true)}>З друзями</button>
             </div>
             {roomMode ? <PrivateRooms onBalanceChanged={() => void refresh()} /> : <>
-            <BotFeed feed={state?.feed ?? []} />
+            <div className="game-modes roulette-stakes" role="group" aria-label="Ліміти ставок">
+              {modes.map((option) => (
+                <button type="button" className="secondary" key={option} aria-pressed={mode === option}
+                  disabled={submitting || !!retry} onClick={() => changeMode(option)}>
+                  {ROULETTE_MODES[option].min}–{ROULETTE_MODES[option].max} $
+                </button>
+              ))}
+            </div>
+            <BotFeed feed={game?.feed ?? []} />
             <section className="arena" aria-labelledby="arena-title">
               <div className="wheel-area">
                 <div className="arena-heading">
@@ -173,22 +205,23 @@ export default function Betbook() {
               </div>
               <div className="bet-area">
                 <form onSubmit={submit}>
-                  <label htmlFor="stake">Віртуальна ставка</label>
+                  <label htmlFor="stake">Віртуальна ставка · {min}–{max} $</label>
                   <div className="input-wrap">
                     <input id="stake" type="text" inputMode="numeric" autoComplete="off" value={placed ? String(placed) : amount}
-                      onChange={(event) => { if (/^\d{0,15}$/.test(event.target.value)) setAmount(event.target.value); }}
+                      onChange={(event) => { if (/^\d{0,3}$/.test(event.target.value)) setAmount(event.target.value); }}
                       disabled={locked || !!retry} />
                     <span>$</span>
                   </div>
                   <div className="chips" aria-label="Розмір ставки">
-                    {[5, 10, 25].map((value) => (
+                    {presets.map((value) => (
                       <button type="button" key={value} disabled={balance < value || locked || !!retry}
                         aria-pressed={Number(amount) === value} onClick={() => setAmount(String(value))}>{cash(value)}</button>
                     ))}
-                    <button type="button" disabled={balance < 1 || locked || !!retry}
-                      onClick={() => setAmount(String(balance))}>Увесь баланс</button>
+                    {balance >= min && balance < max && !presets.some((value) => value === balance) && (
+                      <button type="button" disabled={locked || !!retry} onClick={() => setAmount(String(balance))}>Увесь баланс</button>
+                    )}
                   </div>
-                  {estimated && state && !placed && (
+                  {estimated && game && !placed && (
                     <p className="odds"><span>На момент розіграшу</span><span>Частка <strong>{percent(estimated.share)}</strong></span><span>Шанс <strong>{percent(estimated.chance)}</strong></span></p>
                   )}
                   <button className="primary" disabled={submitting || (!retry && (locked || !validStake || stake > balance))}>
@@ -197,14 +230,16 @@ export default function Betbook() {
                 </form>
                 {state && !balance && !placed && <p className="notice">Наступний бонус доступний з опівночі за Києвом.</p>}
                 {state && !placed && balance > 0 && stake > balance && <p className="notice">Ставка перевищує віртуальний баланс.</p>}
-                {!state && !error && <p className="notice" role="status">Завантажуємо гру…</p>}
+                {game && !placed && amount && !validStake && <p className="notice">Допустима ставка від {min} до {max} $.</p>}
+                {!game && !error && <p className="notice" role="status">Завантажуємо гру…</p>}
                 {error && <div className="notice error" role="alert">{error}<button type="button" onClick={() => void refresh()}>Оновити</button></div>}
-                {state?.latest && <p className="notice result" role="status">{resultMessage(state.latest)}</p>}
+                {game?.latest && <p className="notice result" role="status">{resultMessage(game.latest)}</p>}
               </div>
             </section>
             <section className="entries" aria-labelledby="entries-title">
               <h2 id="entries-title">Учасники раунду</h2>
-              <p>Боти додають ставки до кінця раунду. У таблиці показано поточний банк і частки.</p>
+              <p>Кожен бот робить одну ставку протягом раунду.</p>
+              {!spin && !participants.length && <p>Чекаємо на перші ставки.</p>}
               <div className="entry-table">
                 <table>
                   <thead><tr><th>Гравець</th><th>Ставка</th><th>Частка банку</th><th>Шанс</th></tr></thead>
@@ -239,10 +274,10 @@ export default function Betbook() {
             <p>Чистий програш враховує ставки й виплати за завершеними раундами. Щоденні бонуси не враховуються.</p>
           </section>
         )}
-        {tab === "credits" && (
+        {tab === "help" && (
           <section className="info-page">
-            <h1>Кредити</h1>
-            {credits.map((part) => <p className="credits-copy" key={part}>{part}</p>)}
+            <h1>Довідка</h1>
+            {helpText.map((part) => <p className="credits-copy" key={part}>{part}</p>)}
           </section>
         )}
         {tab === "admin" && isAdmin && <AdminPanel onBalanceUpdated={() => void refresh()} />}

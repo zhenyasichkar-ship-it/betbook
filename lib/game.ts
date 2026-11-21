@@ -1,15 +1,27 @@
 export const DAILY_BONUS = 100;
 export const ROUND_MS = 60_000;
+export const ROULETTE_MODES = {
+  low: { min: 1, max: 50, presets: [1, 10, 25, 50], seed: 0x249e3a },
+  medium: { min: 10, max: 200, presets: [10, 50, 100, 200], seed: 0x72a0d8 },
+  high: { min: 50, max: 500, presets: [50, 100, 250, 500], seed: 0x102b67 }
+} as const;
+export type RouletteMode = keyof typeof ROULETTE_MODES;
+export const DEFAULT_MODE: RouletteMode = "low";
+
+export function isRouletteMode(value: unknown): value is RouletteMode {
+  return value === "low" || value === "medium" || value === "high";
+}
 
 const NAMES = "Неон Луна Тайфун Сіріус Рись Мавка Онікс Кобра Сонар Барс Міраж Вихор Кварц Сокіл Туман Хвиля Флінт Фенікс Клен Бурштин Грім Спалах Крук Лотос Іскра Сапфір Сова Ріф Скат Оріон Сірко Метеор Пульс Обрій М’ята Тайга Сойка Комета Радар Варта Берег Злива Гейзер Лава Атлас Шторм Блиск Дюна".split(" ");
 const COLORS = ["#ac84fa", "#56e8d7", "#ffae72", "#63afff", "#ef8aeb", "#d5e973", "#f77a77", "#8be5ff", "#f8d589", "#b0f38c", "#8879ff", "#ff97c1"];
 
 export type Avatar = { name: string; color: string; avatar: number };
-type Contestant = Avatar & { id: string; stake: number };
+type Contestant = Avatar & { id: string; stake: number; depositAt?: number; responseRate?: number };
 export type Participant = Contestant & { share: number; chance: number };
-export type RoundOffer = { number: number; endsAt: number; bots: Contestant[]; live: boolean };
+export type RoundOffer = { number: number; endsAt: number; bots: Contestant[]; live: boolean; mode: RouletteMode | "legacy" };
 export type Round = {
   number: number;
+  mode?: RouletteMode;
   winner: string;
   participants: Participant[];
   stake: number;
@@ -19,7 +31,7 @@ export type GameState = {
   now: number;
   profile: Avatar & { balance: number; rounds: number; netLoss: number; bonusDay: string; isAdmin: boolean };
   offer: RoundOffer;
-  bet: { stake: number } | null;
+  bet: { stake: number; placedAt: number } | null;
   feed: (Avatar & { round: number; pot: number; key: string })[];
   latest: Round;
   lastBet: Round | null;
@@ -43,21 +55,40 @@ export function legacyRoundNumber(now: number) {
   return Math.floor(now / 120_000);
 }
 
-export function roundOffer(number: number, live = true): RoundOffer {
-  const random = randomFor(number);
+export function roundOffer(number: number, live = true, mode: RoundOffer["mode"] = "legacy"): RoundOffer {
+  const limits = mode === "legacy" ? null : ROULETTE_MODES[mode];
+  const random = randomFor(number ^ (limits?.seed ?? 0));
   const pool = [...NAMES];
-  const count = live ? 3 : 8 + Math.floor(random() * 5);
-  const bots = COLORS.slice(0, count).map((color) => {
+  const count = limits ? 2 + Math.floor(random() * 5) : live ? 3 : 8 + Math.floor(random() * 5);
+  const bots = COLORS.slice(0, count).map((color, order) => {
     const index = Math.floor(random() * pool.length);
     const [name] = pool.splice(index, 1);
     const id = NAMES.indexOf(name);
-    return { id: "bot-" + id, name, avatar: Math.imul(id + 13, 0x7feb352d) >>> 0, color,
-      stake: live ? 18 + Math.floor(random() * 23) : 1 + Math.floor(random() * (number % 5 === 0 ? 20 : 6)) };
+    const identity = { id: "bot-" + id, name, avatar: Math.imul(id + 13, 0x7feb352d) >>> 0, color };
+    if (!limits) {
+      return { ...identity, stake: live ? 18 + Math.floor(random() * 23) : 1 + Math.floor(random() * (number % 5 === 0 ? 20 : 6)) };
+    }
+    const progress = ((order + 0.15 + random() * 0.7) / count) ** 0.8;
+    return {
+      ...identity,
+      stake: limits.min + Math.floor((limits.max - limits.min) * (0.18 + random() * 0.42) * (0.55 + progress * 0.45)),
+      depositAt: number * ROUND_MS + 2500 + Math.floor(55_000 * progress),
+      responseRate: 0.29 + random() * 0.33
+    };
   });
-  return { number, endsAt: (number + 1) * ROUND_MS, bots, live };
+  return { number, endsAt: (number + 1) * ROUND_MS, bots, live, mode };
 }
 
-export function liveOffer(offer: RoundOffer, playerStake: number, now: number): RoundOffer {
+export function liveOffer(offer: RoundOffer, playerStake: number, now: number, placedAt = Infinity): RoundOffer {
+  if (offer.mode !== "legacy") {
+    const { max } = ROULETTE_MODES[offer.mode];
+    const bots = offer.bots.flatMap((bot) => {
+      if (bot.depositAt === undefined || bot.depositAt > now) return [];
+      const boost = placedAt < bot.depositAt ? Math.floor(playerStake * (bot.responseRate ?? 0)) : 0;
+      return [{ ...bot, stake: Math.min(max, bot.stake + boost) }];
+    });
+    return { ...offer, bots };
+  }
   if (!offer.live) return offer;
   const elapsed = Math.max(0, Math.min(ROUND_MS, now - offer.endsAt + ROUND_MS));
   const supportedStake = Math.min(playerStake, Math.max(0, Number.MAX_SAFE_INTEGER - playerStake - 125));
@@ -100,12 +131,13 @@ export function resolveRound(offer: RoundOffer, stake: number, player: Avatar, d
       break;
     }
   }
-  return { number: offer.number, winner, participants, stake, pot: totalPot(offer, stake) };
+  return { number: offer.number, winner, participants, stake, pot: totalPot(offer, stake),
+    ...(offer.mode === "legacy" ? {} : { mode: offer.mode }) };
 }
 
-export function botRound(number: number) {
-  const base = roundOffer(number);
+export function botRound(number: number, mode: RouletteMode) {
+  const base = roundOffer(number, true, mode);
   const offer = liveOffer(base, 0, base.endsAt);
-  const ticket = Math.floor(randomFor(number ^ 0x51a537)() * totalPot(offer, 0));
+  const ticket = Math.floor(randomFor(number ^ 0x51a537 ^ ROULETTE_MODES[mode].seed)() * totalPot(offer, 0));
   return resolveRound(offer, 0, { name: "", avatar: 0, color: "" }, ticket);
 }

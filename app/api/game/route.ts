@@ -1,4 +1,5 @@
-import { openGame, placeBet, type Bet } from "../../../lib/store";
+import { openGame, placeBet, type ModeBet } from "../../../lib/store";
+import { DEFAULT_MODE, isRouletteMode } from "../../../lib/game";
 import { GameError, identify } from "../../../lib/telegram";
 import { apiFailure, json, requestIdPattern } from "../../../lib/api";
 import { settleExpiredRooms } from "../../../lib/rooms";
@@ -9,8 +10,10 @@ export const dynamic = "force-dynamic";
 export async function GET(request: Request) {
   try {
     const player = identify(request);
+    const mode = new URL(request.url).searchParams.get("mode") ?? DEFAULT_MODE;
+    if (!isRouletteMode(mode)) throw new GameError("Невідомий режим рулетки.", 400);
     await settleExpiredRooms(player.id);
-    return json(await openGame(player));
+    return json(await openGame(player, mode));
   } catch (error) {
     return apiFailure(error);
   }
@@ -19,7 +22,7 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   try {
     const player = identify(request);
-    const value: Partial<Bet> | null = await request.json().catch(() => null);
+    const value: Partial<ModeBet> | null = await request.json().catch(() => null);
     if (
       !value || typeof value.stake !== "number" || !Number.isSafeInteger(value.stake) || value.stake < 1 ||
       typeof value.round !== "number" || !Number.isSafeInteger(value.round) || value.round < 1 ||
@@ -27,7 +30,9 @@ export async function POST(request: Request) {
     ) {
       throw new GameError("Вкажіть ставку цілим числом від 1 віртуального $.", 400);
     }
-    const bet = { stake: value.stake, round: value.round, requestId: value.requestId };
+    const mode = value.mode ?? DEFAULT_MODE;
+    if (!isRouletteMode(mode)) throw new GameError("Невідомий режим рулетки.", 400);
+    const bet = { stake: value.stake, round: value.round, requestId: value.requestId, mode };
     await settleExpiredRooms(player.id);
     return json(await placeBet(player, bet));
   } catch (error) {

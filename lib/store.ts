@@ -1,8 +1,8 @@
 import { createHash, randomBytes, randomInt } from "node:crypto";
 import { Pool, type PoolClient } from "pg";
 import {
-  botRound, DAILY_BONUS, legacyRoundNumber, liveOffer, resolveRound, roundNumber, roundOffer, totalPot,
-  type Avatar, type GameState, type Round
+  botRound, DAILY_BONUS, legacyRoundNumber, liveOffer, resolveRound, ROULETTE_MODES, roundNumber, roundOffer, totalPot,
+  type Avatar, type GameState, type Round, type RouletteMode
 } from "./game";
 import { GameError, isAdmin, type Player } from "./telegram";
 import { LEADERBOARD_PAGE_SIZE, type AdminStats } from "./admin";
@@ -20,8 +20,11 @@ type BetRow = {
   return_factor: number | null;
   fair_odds: boolean;
   live_bots: boolean;
+  mode: RouletteMode | "legacy";
+  placed_ms: string | null;
 };
 export type Bet = { stake: number; round: number; requestId: string };
+export type ModeBet = Bet & { mode: RouletteMode };
 
 const cache = globalThis as typeof globalThis & { betbookPool?: Pool };
 const playerFields = "balance, game_net, completed_rounds, to_char(last_bonus_day, 'YYYY-MM-DD') AS bonus_day";
@@ -100,15 +103,15 @@ function withPlayer<T>(player: Player, run: (db: PoolClient, row: PlayerRow, now
 
 async function settleBets(db: PoolClient, player: Player, row: PlayerRow, now: number) {
   const { rows } = await db.query<BetRow>(
-    "SELECT round_number, stake, return_factor, fair_odds, live_bots FROM timed_bets " +
+    "SELECT round_number, stake, return_factor, fair_odds, live_bots, mode, placed_ms FROM timed_bets " +
     "WHERE telegram_id = $1 AND result IS NULL AND round_number < $2 " +
-    "AND (fair_odds OR round_number < $3) ORDER BY round_number",
+    "AND (fair_odds OR round_number < $3) ORDER BY round_number, mode",
     [player.id, roundNumber(now), legacyRoundNumber(now)]
   );
   for (const bet of rows) {
     const stake = Number(bet.stake);
-    const base = roundOffer(bet.round_number, bet.live_bots);
-    const offer = liveOffer(base, stake, base.endsAt);
+    const base = roundOffer(bet.round_number, bet.live_bots, bet.mode);
+    const offer = liveOffer(base, stake, base.endsAt, bet.placed_ms === null ? Infinity : Number(bet.placed_ms));
     const draw = bet.fair_odds ? randomTicket(totalPot(offer, stake)) : randomInt(1_000_000_000) / 1_000_000_000;
     const result = resolveRound(offer, stake, { ...avatar(player), name: "Ви" }, draw,
       bet.fair_odds ? undefined : bet.return_factor);
@@ -119,8 +122,8 @@ async function settleBets(db: PoolClient, player: Player, row: PlayerRow, now: n
       [player.id, payout, payout - stake]
     );
     await db.query(
-      "UPDATE timed_bets SET result = $3, winner = $4, pot = $5 WHERE telegram_id = $1 AND round_number = $2",
-      [player.id, result.number, result, result.winner, result.pot]
+      "UPDATE timed_bets SET result = $3, winner = $4, pot = $5 WHERE telegram_id = $1 AND round_number = $2 AND mode = $6",
+      [player.id, result.number, result, result.winner, result.pot, bet.mode]
     );
     row = updated.rows[0];
   }
@@ -132,26 +135,27 @@ function winCard(result: Round, key: string) {
   return { name: winner.name, avatar: winner.avatar, color: winner.color, round: result.number, pot: result.pot, key };
 }
 
-async function readState(db: PoolClient, player: Player, row: PlayerRow, now: number): Promise<GameState> {
+async function readState(db: PoolClient, player: Player, row: PlayerRow, now: number, mode: RouletteMode): Promise<GameState> {
   const number = roundNumber(now);
-  const current = await db.query<{ stake: string; live_bots: boolean }>(
-    "SELECT stake, live_bots FROM timed_bets WHERE telegram_id = $1 AND round_number = $2 AND fair_odds",
-    [player.id, number]
+  const current = await db.query<{ stake: string; placed_ms: string }>(
+    "SELECT stake, placed_ms FROM timed_bets WHERE telegram_id = $1 AND round_number = $2 AND mode = $3",
+    [player.id, number, mode]
   );
-  const previous = await db.query<{ result: Round }>(
-    "SELECT result FROM timed_bets WHERE telegram_id = $1 AND round_number < $2 AND result IS NOT NULL " +
-    "ORDER BY round_number DESC LIMIT 1",
-    [player.id, number]
+  const previous = await db.query<{ last_bet: Round | null; mode_bet: Round | null }>(
+    "SELECT (SELECT result FROM timed_bets WHERE telegram_id = $1 AND round_number < $2 AND result IS NOT NULL " +
+    "ORDER BY round_number DESC, placed_ms DESC NULLS LAST LIMIT 1) AS last_bet, " +
+    "(SELECT result FROM timed_bets WHERE telegram_id = $1 AND round_number = $2 - 1 AND mode = $3) AS mode_bet",
+    [player.id, number, mode]
   );
   const wins = await db.query<{ result: Round; key: string }>(
-    "SELECT result, request_id AS key FROM timed_bets WHERE winner <> 'player' " +
+    "SELECT result, request_id AS key FROM timed_bets WHERE winner <> 'player' AND mode = $3 " +
     "AND round_number BETWEEN $1 AND $2 ORDER BY round_number DESC, pot DESC, request_id LIMIT 5",
-    [number - 6, number - 1]
+    [number - 6, number - 1, mode]
   );
   const bet = current.rows[0];
-  const lastBet = previous.rows[0]?.result ?? null;
-  const previousBotRound = botRound(number - 1);
-  const recentBots = [previousBotRound, ...[2, 3, 4, 5, 6].map((offset) => botRound(number - offset))];
+  const { last_bet: lastBet, mode_bet: modeBet } = previous.rows[0];
+  const previousBotRound = botRound(number - 1, mode);
+  const recentBots = [previousBotRound, ...[2, 3, 4, 5, 6].map((offset) => botRound(number - offset, mode))];
   const feed = [
     ...recentBots.map((result) => winCard(result, "bots-" + result.number)),
     ...wins.rows.map(({ result, key }) => winCard(result, key))
@@ -166,10 +170,10 @@ async function readState(db: PoolClient, player: Player, row: PlayerRow, now: nu
       bonusDay: row.bonus_day,
       isAdmin: isAdmin(player)
     },
-    offer: roundOffer(number, bet?.live_bots ?? true),
-    bet: bet ? { stake: Number(bet.stake) } : null,
+    offer: roundOffer(number, true, mode),
+    bet: bet ? { stake: Number(bet.stake), placedAt: Number(bet.placed_ms) } : null,
     feed,
-    latest: lastBet?.number === number - 1 ? lastBet : previousBotRound,
+    latest: modeBet ?? previousBotRound,
     lastBet
   };
 }
@@ -247,33 +251,35 @@ export function welcomeOnce(chatId: number, send: () => Promise<unknown>) {
   });
 }
 
-export function openGame(player: Player) {
-  return withPlayer(player, (db, row, now) => readState(db, player, row, now));
+export function openGame(player: Player, mode: RouletteMode) {
+  return withPlayer(player, (db, row, now) => readState(db, player, row, now, mode));
 }
 
-export function placeBet(player: Player, bet: Bet) {
+export function placeBet(player: Player, bet: ModeBet) {
   return withPlayer(player, async (db, row, now) => {
+    const { min, max } = ROULETTE_MODES[bet.mode];
+    if (bet.stake < min || bet.stake > max) throw new GameError("Для цього режиму ставка має бути від " + min + " до " + max + " $.", 422);
     const saved = await db.query<BetRow>(
-      "SELECT round_number, stake FROM timed_bets WHERE telegram_id = $1 AND request_id = $2",
+      "SELECT round_number, stake, mode FROM timed_bets WHERE telegram_id = $1 AND request_id = $2",
       [player.id, bet.requestId]
     );
     if (saved.rows[0]) {
-      if (saved.rows[0].round_number !== bet.round || Number(saved.rows[0].stake) !== bet.stake) {
+      if (saved.rows[0].round_number !== bet.round || Number(saved.rows[0].stake) !== bet.stake || saved.rows[0].mode !== bet.mode) {
         throw new GameError("Цей запит уже використано для іншої ставки.", 409);
       }
-      return readState(db, player, row, now);
+      return readState(db, player, row, now, bet.mode);
     }
     if (bet.round !== roundNumber(now)) {
       throw new GameError("Раунд завершився. Перевірте ставку для нового раунду.", 409);
     }
     const current = await db.query(
-      "SELECT 1 FROM timed_bets WHERE telegram_id = $1 AND round_number = $2",
-      [player.id, bet.round]
+      "SELECT 1 FROM timed_bets WHERE telegram_id = $1 AND round_number = $2 AND mode = $3",
+      [player.id, bet.round, bet.mode]
     );
     if (current.rowCount) throw new GameError("Ви вже зробили ставку в цьому раунді.", 409);
     if (bet.stake > Number(row.balance)) throw new GameError("Недостатньо віртуальних коштів.", 422);
-    const base = roundOffer(bet.round);
-    const bots = liveOffer(base, bet.stake, base.endsAt);
+    const base = roundOffer(bet.round, true, bet.mode);
+    const bots = liveOffer(base, bet.stake, base.endsAt, now);
     if (!Number.isSafeInteger(Number(row.balance) + totalPot(bots, 0))) {
       throw new GameError("Досягнуто ліміту балансу.", 422);
     }
@@ -282,9 +288,10 @@ export function placeBet(player: Player, bet: Bet) {
       [player.id, bet.stake]
     );
     await db.query(
-      "INSERT INTO timed_bets (telegram_id, round_number, request_id, stake, fair_odds, live_bots) VALUES ($1, $2, $3, $4, true, true)",
-      [player.id, bet.round, bet.requestId, bet.stake]
+      "INSERT INTO timed_bets (telegram_id, round_number, request_id, stake, fair_odds, live_bots, mode, placed_ms) " +
+      "VALUES ($1, $2, $3, $4, true, true, $5, $6)",
+      [player.id, bet.round, bet.requestId, bet.stake, bet.mode, now]
     );
-    return readState(db, player, updated.rows[0], now);
+    return readState(db, player, updated.rows[0], now, bet.mode);
   });
 }
