@@ -1,12 +1,13 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import { DAILY_BONUS, DEFAULT_MODE, lineup, liveOffer, ROULETTE_MODES, roundOffer, totalPot,
+import { DEFAULT_MODE, lineup, liveOffer, ROULETTE_MODES, roundOffer, totalPot,
   type GameState, type RouletteMode, type Round } from "../lib/game";
 import { AvatarBadge, BotFeed, SpinWheel, cash, percent } from "./roulette";
 import { ApiError, OFFLINE, request } from "./api-client";
 import { AdminPanel } from "./admin-panel";
 import { PrivateRooms } from "./private-rooms";
+import { HelpStats, WalletDeposit } from "./player-info";
 
 type Tab = "wheel" | "profile" | "help" | "admin";
 type Bet = { round: number; stake: number; requestId: string; mode: RouletteMode };
@@ -176,10 +177,7 @@ export default function Betbook() {
       <main>
         {tab === "wheel" && (
           <>
-            <section className="bonus">
-              <div><strong>Привіт! Тримай свій бонус</strong><p>{state ? "Сьогодні зараховано." : "Щодня при вході в застосунок."}</p></div>
-              <span>{ "+" + cash(DAILY_BONUS)}</span>
-            </section>
+            <WalletDeposit onDeposit={() => void refresh()} />
             <div className="game-modes" role="group" aria-label="Режим рулетки">
               <button type="button" className="secondary" aria-pressed={!roomMode} onClick={() => setRoomMode(false)}>З ботами</button>
               <button type="button" className="secondary" aria-pressed={roomMode} onClick={() => setRoomMode(true)}>З друзями</button>
@@ -228,7 +226,7 @@ export default function Betbook() {
                     {submitting ? "Приймаємо ставку…" : retry ? "Повторити запит" : placed ? "Ставку прийнято" : "Зробити ставку"}
                   </button>
                 </form>
-                {state && !balance && !placed && <p className="notice">Наступний бонус доступний з опівночі за Києвом.</p>}
+                {state && !balance && !placed && <p className="notice">Поповни баланс, щоб зробити ставку.</p>}
                 {state && !placed && balance > 0 && stake > balance && <p className="notice">Ставка перевищує віртуальний баланс.</p>}
                 {game && !placed && amount && !validStake && <p className="notice">Допустима ставка від {min} до {max} $.</p>}
                 {!game && !error && <p className="notice" role="status">Завантажуємо гру…</p>}
@@ -271,13 +269,14 @@ export default function Betbook() {
               <div><dt>Зіграно раундів</dt><dd>{state?.profile.rounds ?? "—"}</dd></div>
             </dl>
             {lastBet && <p>Остання ставка. {resultMessage(lastBet)}</p>}
-            <p>Чистий програш враховує ставки й виплати за завершеними раундами. Щоденні бонуси не враховуються.</p>
+            <p>Чистий програш враховує лише ставки й виплати за завершеними раундами.</p>
           </section>
         )}
         {tab === "help" && (
           <section className="info-page">
             <h1>Довідка</h1>
             {helpText.map((part) => <p className="credits-copy" key={part}>{part}</p>)}
+            <HelpStats />
           </section>
         )}
         {tab === "admin" && isAdmin && <AdminPanel onBalanceUpdated={() => void refresh()} />}

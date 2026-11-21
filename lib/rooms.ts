@@ -57,7 +57,11 @@ async function settleRoom(db: PoolClient, code: string, current: number) {
     "ORDER BY telegram_id FOR UPDATE",
     [code, rows.map((row) => row.number)]
   );
+  const season = await db.query<{ epoch: number }>(
+    "SELECT extract(epoch FROM started_at)::double precision AS epoch FROM leaderboard_resets WHERE name = 'manual-deposits'"
+  );
   for (const { number } of rows) {
+    const beforeSeason = !!season.rows[0] && (number + 1) * 60 <= season.rows[0].epoch;
     const seats = await readSeats(db, code, number);
     const { participants, pot } = entries(code, seats);
     let winner: string | null = null;
@@ -75,8 +79,10 @@ async function settleRoom(db: PoolClient, code: string, current: number) {
       const stake = Number(seat.stake);
       const payout = winner ? (participants[index].id === winner ? pot : 0) : stake;
       await db.query(
-        "UPDATE players SET balance = balance + $2, game_net = game_net + $3, completed_rounds = completed_rounds + $4 " +
-        "WHERE telegram_id = $1", [seat.telegram_id, payout, payout - stake, winner ? 1 : 0]
+        "UPDATE players SET balance = balance + $2, game_net = game_net + $3, completed_rounds = completed_rounds + $4, " +
+        "season_start_net = season_start_net + CASE WHEN $5 THEN $3 ELSE 0 END, " +
+        "season_start_rounds = season_start_rounds + CASE WHEN $5 THEN $4 ELSE 0 END " +
+        "WHERE telegram_id = $1", [seat.telegram_id, payout, payout - stake, winner ? 1 : 0, beforeSeason]
       );
     }
     const result: RoomResult = { number, pot, participants, winner };

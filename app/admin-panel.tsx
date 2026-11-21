@@ -102,8 +102,8 @@ export function AdminPanel({ onBalanceUpdated }: { onBalanceUpdated(): void }) {
       {error && <p className="notice error" role="alert">{error}</p>}
       {stats && (
         <div className="entries">
-          <h2>Рейтинг усіх користувачів</h2>
-          <p>Усього {stats.leaderboard.total} · за чистим результатом гри</p>
+          <h2>Рейтинг поточного сезону</h2>
+          <p>Усього {stats.leaderboard.total} · за чистим результатом сезону</p>
           {stats.leaderboard.players.length > 0 ? (
             <>
               <div className="entry-table">
@@ -131,7 +131,7 @@ export function AdminPanel({ onBalanceUpdated }: { onBalanceUpdated(): void }) {
                 </div>
               )}
             </>
-          ) : <p>Поки немає зареєстрованих користувачів.</p>}
+          ) : <p>У цьому сезоні ще немає завершених раундів.</p>}
         </div>
       )}
     </section>
