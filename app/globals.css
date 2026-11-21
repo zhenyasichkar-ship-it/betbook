@@ -299,17 +299,14 @@ h1 { font-size: clamp(1.6rem, 3vw, 2.25rem); line-height: 1.1; letter-spacing: -
 .game-modes.roulette-stakes { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .wallet-deposit .bonus button { flex: none; }
 .wallet-deposit > .notice { margin: 0 8px 8px; }
-.casino-banner {
-  margin-bottom: 8px;
-  padding: 9px 12px;
-  border: 1px solid #ff94ce40;
-  border-radius: 12px;
-  background: linear-gradient(100deg, #3c204b, #1c1129);
-}
-.casino-banner dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 0; }
-.casino-banner dl > div + div { border-left: 1px solid var(--border); padding-left: 10px; }
-.casino-banner dt { color: var(--muted); font-size: .8rem; }
-.casino-banner dd { color: var(--mint); font-weight: 850; font-variant-numeric: tabular-nums; margin: 3px 0 0; overflow-wrap: anywhere; }
+.help-casino { margin-top: 9px; }
+.help-casino dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 0; }
+.help-casino dl > div { padding: 10px 12px; border: 1px solid var(--border); border-radius: 12px; background: #21142e; }
+.help-casino dt { color: var(--muted); font-size: .8rem; }
+.help-casino dd { color: var(--mint); font-weight: 850; font-size: 1.18rem; font-variant-numeric: tabular-nums; margin: 4px 0 0; overflow-wrap: anywhere; }
+.help-casino dl > .help-casino-net { grid-column: 1 / -1; text-align: center; background: #30203f; }
+.help-casino-net[data-result=loss] dd { color: #ffb3cc; }
+.help-casino > p { color: var(--muted); font-size: .76rem; margin: 8px 3px 0; }
 .game-modes button[aria-pressed=true] { background: #4e2246; border-color: #ff8ccb66; }
 .rooms-lobby form { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 8px; margin-top: 16px; }
 .rooms-lobby .room-creation { grid-template-columns: repeat(2, minmax(0, 1fr)); }

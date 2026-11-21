@@ -265,20 +265,27 @@ export function deposit(player: Player, requestId: string) {
 
 export function getPublicStats() {
   return transaction(async (db): Promise<PublicStats> => {
-    const { rows } = await db.query<{ played: string; house_net: string }>(
+    const { rows } = await db.query<{ played: string; house_net: string; deposited: string; lost: string }>(
       "WITH period AS (SELECT coalesce((SELECT started_at FROM help_statistics_reset), '-infinity'::timestamptz) AS cutoff), " +
       "bot_rounds AS (" +
-      "SELECT telegram_id, stake - CASE WHEN winner = 'player' THEN pot ELSE 0 END AS net " +
+      "SELECT telegram_id, stake - CASE WHEN winner = 'player' THEN pot ELSE 0 END AS net, " +
+      "CASE WHEN winner <> 'player' THEN stake ELSE 0 END AS lost " +
       "FROM timed_bets, period WHERE result IS NOT NULL AND telegram_id > 0 " +
       "AND to_timestamp((round_number + 1)::double precision * CASE WHEN fair_odds THEN 60 ELSE 120 END) > cutoff " +
-      "UNION ALL SELECT telegram_id, coalesce((result->>'stake')::bigint, 0) - CASE WHEN winner = 'player' THEN pot ELSE 0 END " +
+      "UNION ALL SELECT telegram_id, coalesce((result->>'stake')::bigint, 0) - CASE WHEN winner = 'player' THEN pot ELSE 0 END, " +
+      "CASE WHEN winner <> 'player' THEN coalesce((result->>'stake')::bigint, 0) ELSE 0 END " +
       "FROM rounds, period WHERE telegram_id > 0 AND played_at > cutoff), " +
       "played_since_reset AS (SELECT telegram_id FROM bot_rounds UNION " +
       "SELECT b.telegram_id FROM private_bets b JOIN private_rounds r USING (code, number), period " +
-      "WHERE b.telegram_id > 0 AND r.result->>'winner' IS NOT NULL AND to_timestamp((r.number + 1)::double precision * 60) > cutoff) " +
-      "SELECT (SELECT count(*) FROM played_since_reset) AS played, (SELECT coalesce(sum(net), 0) FROM bot_rounds) AS house_net"
+      "WHERE b.telegram_id > 0 AND r.result->>'winner' IS NOT NULL AND to_timestamp((r.number + 1)::double precision * 60) > cutoff), " +
+      "deposits AS (SELECT amount FROM hourly_virtual_deposits, period WHERE telegram_id > 0 AND claimed_at > cutoff " +
+      "UNION ALL SELECT amount FROM virtual_deposits, period WHERE telegram_id > 0 " +
+      "AND deposit_day > (cutoff AT TIME ZONE 'Europe/Kyiv')::date) " +
+      "SELECT (SELECT count(*) FROM played_since_reset) AS played, (SELECT coalesce(sum(amount), 0) FROM deposits) AS deposited, " +
+      "coalesce(sum(net), 0) AS house_net, coalesce(sum(lost), 0) AS lost FROM bot_rounds"
     );
-    return { played: Number(rows[0].played), houseNet: Number(rows[0].house_net) };
+    const { played, house_net, deposited, lost } = rows[0];
+    return { played: Number(played), houseNet: Number(house_net), deposited: Number(deposited), lost: Number(lost) };
   });
 }
 

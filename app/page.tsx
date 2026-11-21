@@ -174,7 +174,6 @@ export default function Betbook() {
         </a>
         <div className="wallet"><span>Віртуальний баланс</span><strong>{state ? cash(balance) : "—"}</strong></div>
       </header>
-      <CasinoStats />
       <main>
         {tab === "wheel" && (
           <>
@@ -274,10 +273,13 @@ export default function Betbook() {
           </section>
         )}
         {tab === "help" && (
-          <section className="info-page">
-            <h1>Довідка</h1>
-            {helpText.map((part) => <p className="credits-copy" key={part}>{part}</p>)}
-          </section>
+          <>
+            <section className="info-page">
+              <h1>Довідка</h1>
+              {helpText.map((part) => <p className="credits-copy" key={part}>{part}</p>)}
+            </section>
+            <CasinoStats />
+          </>
         )}
         {tab === "admin" && isAdmin && <AdminPanel onBalanceUpdated={() => void refresh()} />}
       </main>

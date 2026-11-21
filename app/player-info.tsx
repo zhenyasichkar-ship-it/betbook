@@ -113,11 +113,16 @@ export function CasinoStats() {
   }, []);
 
   return (
-    <section className="casino-banner" aria-label="Статистика казино">
+    <section className="help-casino" aria-label="Статистика казино">
       <dl>
-        <div><dt>Прибуток казино</dt><dd>{stats ? cash(Math.max(0, stats.houseNet)) : "—"}</dd></div>
-        <div><dt>Людей зіграли</dt><dd>{stats ? stats.played.toLocaleString("uk-UA") : "—"}</dd></div>
+        <div><dt>Поповнення гравців</dt><dd>{stats ? cash(stats.deposited) : "—"}</dd></div>
+        <div><dt>Програно гравцями</dt><dd>{stats ? cash(stats.lost) : "—"}</dd></div>
+        <div className="help-casino-net" data-result={stats && stats.houseNet < 0 ? "loss" : undefined}>
+          <dt>Чистий результат казино</dt>
+          <dd>{stats ? (stats.houseNet > 0 ? "+" : "") + cash(stats.houseNet) : "—"}</dd>
+        </div>
       </dl>
+      <p>Усі суми у віртуальних доларах після останнього скидання. Ігрові суми враховують раунди з ботами.</p>
     </section>
   );
 }
