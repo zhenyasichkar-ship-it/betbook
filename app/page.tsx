@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import { DEFAULT_MODE, lineup, liveOffer, ROULETTE_MODES, roundOffer, totalPot,
+import { DEFAULT_MODE, HOUSE_FEE_PERCENT, lineup, liveOffer, payoutAfterFee, ROULETTE_MODES, roundOffer, totalPot,
   type GameState, type RouletteMode, type Round } from "../lib/game";
 import { AvatarBadge, BotFeed, SpinWheel, cash, percent } from "./roulette";
 import { ApiError, OFFLINE, request } from "./api-client";
@@ -19,10 +19,12 @@ function requestGame(mode: RouletteMode, bet?: Bet) {
 }
 
 function resultMessage(round: Round) {
-  if (round.winner === "player") return "Ви виграли " + cash(round.pot - round.stake) + " чистими.";
+  const payout = payoutAfterFee(round);
+  const fee = round.houseFee ? " Комісія казино — " + cash(round.houseFee) + "." : "";
+  if (round.winner === "player") return "Ви виграли " + cash(payout - round.stake) + " чистими." + fee;
   const winner = round.participants.find((player) => player.id === round.winner);
-  return (winner?.name ?? "Бот") + " забирає банк " + cash(round.pot) + "." +
-    (round.stake ? " Ви втратили " + cash(round.stake) + "." : "");
+  return (winner?.name ?? "Бот") + " отримує " + cash(payout) + "." +
+    (round.stake ? " Ви втратили " + cash(round.stake) + "." : "") + fee;
 }
 
 const helpText = [
@@ -204,6 +206,7 @@ export default function Betbook() {
               <div className="bet-area">
                 <form onSubmit={submit}>
                   <label htmlFor="stake">Віртуальна ставка · {min}–{max} $</label>
+                  <p className="notice">Комісія з банку · {HOUSE_FEE_PERCENT}%</p>
                   <div className="input-wrap">
                     <input id="stake" type="text" inputMode="numeric" autoComplete="off" value={placed ? String(placed) : amount}
                       onChange={(event) => { if (/^\d{0,3}$/.test(event.target.value)) setAmount(event.target.value); }}

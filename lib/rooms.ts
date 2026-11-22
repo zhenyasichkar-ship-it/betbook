@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import type { PoolClient } from "pg";
-import { ROUND_MS, roundNumber, type Participant } from "./game";
+import { calculateHouseFee, payoutAfterFee, ROUND_MS, roundNumber, type Participant } from "./game";
 import { ROOM_LIMIT, type RoomLimits, type RoomResult, type RoomState, type RoomSummary } from "./room-types";
 import { avatar, randomTicket, touchPlayer, transaction, type Bet } from "./store";
 import { GameError, type Player } from "./telegram";
@@ -47,8 +47,8 @@ async function readSeats(db: PoolClient, code: string, number: number) {
 }
 
 async function settleRoom(db: PoolClient, code: string, current: number) {
-  const { rows } = await db.query<{ number: number }>(
-    "SELECT number FROM private_rounds WHERE code = $1 AND number < $2 AND result IS NULL ORDER BY number", [code, current]
+  const { rows } = await db.query<{ number: number; house_fee_enabled: boolean }>(
+    "SELECT number, house_fee_enabled FROM private_rounds WHERE code = $1 AND number < $2 AND result IS NULL ORDER BY number", [code, current]
   );
   if (!rows.length) return;
   await db.query(
@@ -60,7 +60,7 @@ async function settleRoom(db: PoolClient, code: string, current: number) {
   const season = await db.query<{ epoch: number }>(
     "SELECT extract(epoch FROM started_at)::double precision AS epoch FROM leaderboard_resets WHERE name = 'manual-deposits'"
   );
-  for (const { number } of rows) {
+  for (const { number, house_fee_enabled } of rows) {
     const beforeSeason = !!season.rows[0] && (number + 1) * 60 <= season.rows[0].epoch;
     const seats = await readSeats(db, code, number);
     const { participants, pot } = entries(code, seats);
@@ -75,9 +75,11 @@ async function settleRoom(db: PoolClient, code: string, current: number) {
         }
       }
     }
+    const houseFee = winner && house_fee_enabled ? calculateHouseFee(pot) : 0;
+    const result: RoomResult = { number, pot, participants, winner, houseFee };
     for (const [index, seat] of seats.entries()) {
       const stake = Number(seat.stake);
-      const payout = winner ? (participants[index].id === winner ? pot : 0) : stake;
+      const payout = winner ? (participants[index].id === winner ? payoutAfterFee(result) : 0) : stake;
       await db.query(
         "UPDATE players SET balance = balance + $2, game_net = game_net + $3, completed_rounds = completed_rounds + $4, " +
         "season_start_net = season_start_net + CASE WHEN $5 THEN $3 ELSE 0 END, " +
@@ -85,7 +87,6 @@ async function settleRoom(db: PoolClient, code: string, current: number) {
         "WHERE telegram_id = $1", [seat.telegram_id, payout, payout - stake, winner ? 1 : 0, beforeSeason]
       );
     }
-    const result: RoomResult = { number, pot, participants, winner };
     await db.query("UPDATE private_rounds SET result = $3 WHERE code = $1 AND number = $2", [code, number, result]);
   }
 }
@@ -198,7 +199,9 @@ export function betInRoom(code: string, player: Player, bet: Bet) {
     if (!Number.isSafeInteger(seats.reduce((pot, seat) => pot + Number(seat.stake), bet.stake))) {
       throw new GameError("Досягнуто ліміту банку.", 422);
     }
-    await db.query("INSERT INTO private_rounds (code, number) VALUES ($1,$2) ON CONFLICT DO NOTHING", [code, bet.round]);
+    await db.query(
+      "INSERT INTO private_rounds (code, number, house_fee_enabled) VALUES ($1,$2,true) ON CONFLICT DO NOTHING", [code, bet.round]
+    );
     await db.query("UPDATE players SET balance = balance - $2 WHERE telegram_id = $1", [player.id, bet.stake]);
     await db.query("INSERT INTO private_bets (code, number, telegram_id, stake, request_id) VALUES ($1,$2,$3,$4,$5)",
       [code, bet.round, player.id, bet.stake, bet.requestId]);

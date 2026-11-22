@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import type { Round } from "../lib/game";
+import { HOUSE_FEE_PERCENT, payoutAfterFee, type Round } from "../lib/game";
 import { ROOM_LIMIT, type RoomState, type RoomSummary } from "../lib/room-types";
 import { ApiError, OFFLINE, request } from "./api-client";
 import { AvatarBadge, SpinWheel, cash, percent } from "./roulette";
@@ -177,8 +177,9 @@ function ActiveRoom({ code, onBack, onBalanceChanged }: { code: string; onBack()
   const locked = !room || !!room.stake || !remaining || !!spin || submitting || deleting;
   const latest = room?.latest;
   const winner = latest?.participants.find((entry) => entry.id === latest.winner);
+  const fee = latest?.houseFee ? " Комісія казино — " + cash(latest.houseFee) + "." : "";
   const result = latest?.winner
-    ? (winner?.id === room?.selfId ? "Ви виграли " : (winner?.name ?? "Гравець") + " виграв(-ла) ") + cash(latest.pot) + "."
+    ? (winner?.id === room?.selfId ? "Ви отримали " : (winner?.name ?? "Гравець") + " отримує ") + cash(payoutAfterFee(latest)) + "." + fee
     : latest ? "Ставку повернено: у раунді був лише один гравець." : "";
 
   async function submit(event: FormEvent) {
@@ -258,6 +259,7 @@ function ActiveRoom({ code, onBack, onBalanceChanged }: { code: string; onBack()
         <div className="bet-area">
           <form onSubmit={submit}>
             <label htmlFor="room-stake">Ставка · {room ? cash(room.balance) + " доступно" : "—"}</label>
+            <p className="notice">Комісія з банку · {HOUSE_FEE_PERCENT}%</p>
             <div className="input-wrap">
               <input id="room-stake" inputMode="numeric" value={room?.stake ? String(room.stake) : amount}
                 disabled={locked || !!retry} onChange={(event) => { if (/^\d{0,16}$/.test(event.target.value)) setAmount(event.target.value); }} />

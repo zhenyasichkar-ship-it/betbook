@@ -74,7 +74,7 @@ export function BotFeed({ feed }: { feed: GameState["feed"] }) {
       <h2><span aria-hidden="true">✦</span> Виграші ботів</h2>
       {item ? (
         <div className="feed-card" key={item.key}>
-          <AvatarBadge identity={item} /><span>{item.name}</span><strong>{cash(item.pot)}</strong>
+          <AvatarBadge identity={item} /><span>{item.name}</span><strong>{cash(item.payout ?? item.pot)}</strong>
         </div>
       ) : <p>Чекаємо на результати…</p>}
     </section>

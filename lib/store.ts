@@ -1,7 +1,8 @@
 import { createHash, randomBytes, randomInt } from "node:crypto";
 import { Pool, type PoolClient } from "pg";
 import {
-  botRound, DAILY_BONUS, legacyRoundNumber, liveOffer, resolveRound, ROULETTE_MODES, roundNumber, roundOffer, totalPot,
+  botRound, calculateHouseFee, DAILY_BONUS, legacyRoundNumber, liveOffer, payoutAfterFee, resolveRound, ROULETTE_MODES,
+  roundNumber, roundOffer, totalPot,
   type Avatar, type GameState, type Round, type RouletteMode
 } from "./game";
 import { GameError, isAdmin, type Player } from "./telegram";
@@ -21,6 +22,7 @@ type BetRow = {
   return_factor: number | null;
   fair_odds: boolean;
   live_bots: boolean;
+  house_fee_enabled: boolean;
   mode: RouletteMode | "legacy";
   placed_ms: string | null;
   before_season: boolean | null;
@@ -103,7 +105,7 @@ function withPlayer<T>(player: Player, run: (db: PoolClient, row: PlayerRow, now
 
 async function settleBets(db: PoolClient, player: Player, row: PlayerRow, now: number) {
   const { rows } = await db.query<BetRow>(
-    "SELECT round_number, stake, return_factor, fair_odds, live_bots, mode, placed_ms, " +
+    "SELECT round_number, stake, return_factor, fair_odds, live_bots, house_fee_enabled, mode, placed_ms, " +
     "to_timestamp((round_number + 1)::double precision * CASE WHEN fair_odds THEN 60 ELSE 120 END) <= " +
     "(SELECT started_at FROM leaderboard_resets WHERE name = 'manual-deposits') AS before_season FROM timed_bets " +
     "WHERE telegram_id = $1 AND result IS NULL AND round_number < $2 " +
@@ -114,10 +116,13 @@ async function settleBets(db: PoolClient, player: Player, row: PlayerRow, now: n
     const stake = Number(bet.stake);
     const base = roundOffer(bet.round_number, bet.live_bots, bet.mode);
     const offer = liveOffer(base, stake, base.endsAt, bet.placed_ms === null ? Infinity : Number(bet.placed_ms));
-    const draw = bet.fair_odds ? randomTicket(totalPot(offer, stake)) : randomInt(1_000_000_000) / 1_000_000_000;
-    const result = resolveRound(offer, stake, { ...avatar(player), name: "Ви" }, draw,
-      bet.fair_odds ? undefined : bet.return_factor);
-    const payout = result.winner === "player" ? result.pot : 0;
+    const pot = totalPot(offer, stake);
+    const draw = bet.fair_odds ? randomTicket(pot) : randomInt(1_000_000_000) / 1_000_000_000;
+    const result = {
+      ...resolveRound(offer, stake, { ...avatar(player), name: "Ви" }, draw, bet.fair_odds ? undefined : bet.return_factor),
+      houseFee: bet.house_fee_enabled ? calculateHouseFee(pot) : 0
+    };
+    const payout = result.winner === "player" ? payoutAfterFee(result) : 0;
     const updated = await db.query<PlayerRow>(
       "UPDATE players SET balance = balance + $2, game_net = game_net + $3, " +
       "completed_rounds = completed_rounds + 1, " +
@@ -137,7 +142,8 @@ async function settleBets(db: PoolClient, player: Player, row: PlayerRow, now: n
 
 function winCard(result: Round, key: string) {
   const winner = result.participants.find((entry) => entry.id === result.winner)!;
-  return { name: winner.name, avatar: winner.avatar, color: winner.color, round: result.number, pot: result.pot, key };
+  return { name: winner.name, avatar: winner.avatar, color: winner.color, round: result.number, pot: result.pot,
+    payout: payoutAfterFee(result), key };
 }
 
 async function readState(db: PoolClient, player: Player, row: PlayerRow, now: number, mode: RouletteMode): Promise<GameState> {
@@ -265,20 +271,25 @@ export function deposit(player: Player, requestId: string) {
 
 export function getPublicStats() {
   return transaction(async (db): Promise<PublicStats> => {
-    const { rows } = await db.query<{ played: string; house_net: string; deposited: string; lost: string; won: string }>(
+    const { rows } = await db.query<{
+      played: string; house_net: string; house_fee: string; deposited: string; lost: string; won: string;
+    }>(
       "WITH period AS (SELECT coalesce((SELECT started_at FROM help_statistics_reset), '-infinity'::timestamptz) AS cutoff), " +
-      "round_results AS (" +
-      "SELECT telegram_id, CASE WHEN winner = 'player' THEN pot ELSE 0 END - stake AS net " +
+      "timed_results AS (SELECT telegram_id, stake, winner, pot, coalesce((result->>'houseFee')::bigint, 0) AS house_fee " +
       "FROM timed_bets, period WHERE result IS NOT NULL AND telegram_id > 0 " +
-      "AND to_timestamp((round_number + 1)::double precision * CASE WHEN fair_odds THEN 60 ELSE 120 END) > cutoff " +
+      "AND to_timestamp((round_number + 1)::double precision * CASE WHEN fair_odds THEN 60 ELSE 120 END) > cutoff), " +
+      "room_results AS (SELECT code, number, result->>'winner' AS winner, (result->>'pot')::bigint AS pot, " +
+      "coalesce((result->>'houseFee')::bigint, 0) AS house_fee FROM private_rounds, period " +
+      "WHERE result->>'winner' IS NOT NULL AND to_timestamp((number + 1)::double precision * 60) > cutoff), " +
+      "round_results AS (SELECT telegram_id, CASE WHEN winner = 'player' THEN pot - house_fee ELSE 0 END - stake AS net " +
+      "FROM timed_results " +
       "UNION ALL SELECT telegram_id, CASE WHEN winner = 'player' THEN pot ELSE 0 END - coalesce((result->>'stake')::bigint, 0) " +
       "FROM rounds, period WHERE telegram_id > 0 AND played_at > cutoff " +
       // Recreate the public member ID recorded in a room result.
-      "UNION ALL SELECT b.telegram_id, (CASE WHEN r.result->>'winner' = " +
+      "UNION ALL SELECT b.telegram_id, (CASE WHEN r.winner = " +
       "left(encode(sha256(convert_to(b.code || ':' || b.telegram_id::text, 'UTF8')), 'hex'), 24) " +
-      "THEN (r.result->>'pot')::bigint ELSE 0 END) - b.stake " +
-      "FROM private_bets b JOIN private_rounds r USING (code, number), period " +
-      "WHERE b.telegram_id > 0 AND r.result->>'winner' IS NOT NULL AND to_timestamp((r.number + 1)::double precision * 60) > cutoff), " +
+      "THEN r.pot - r.house_fee ELSE 0 END) - b.stake " +
+      "FROM private_bets b JOIN room_results r USING (code, number) WHERE b.telegram_id > 0), " +
       "player_results AS (SELECT telegram_id, sum(net) AS net FROM round_results GROUP BY telegram_id), " +
       "reserved_stakes AS (SELECT telegram_id, stake FROM timed_bets WHERE result IS NULL " +
       "UNION ALL SELECT b.telegram_id, b.stake FROM private_bets b JOIN private_rounds r USING (code, number) WHERE r.result IS NULL), " +
@@ -289,10 +300,14 @@ export function getPublicStats() {
       "LEFT JOIN reservations held USING (telegram_id) WHERE p.telegram_id > 0) " +
       "SELECT (SELECT count(*) FROM player_results) AS played, coalesce(sum(funding), 0) AS deposited, " +
       "coalesce(sum(greatest(-net, 0)), 0) AS lost, coalesce(sum(greatest(net, 0)), 0) AS won, " +
-      "coalesce(sum(-net), 0) AS house_net FROM funds"
+      // The actual payouts already include the fee. Sum fees separately once per round for display.
+      "coalesce(sum(-net), 0) AS house_net, " +
+      "coalesce((SELECT sum(house_fee) FROM timed_results), 0) + " +
+      "coalesce((SELECT sum(house_fee) FROM room_results), 0) AS house_fee FROM funds"
     );
-    const { played, house_net, deposited, lost, won } = rows[0];
-    return { played: Number(played), houseNet: Number(house_net), deposited: Number(deposited), lost: Number(lost), won: Number(won) };
+    const { played, house_net, house_fee, deposited, lost, won } = rows[0];
+    return { played: Number(played), houseNet: Number(house_net), houseFee: Number(house_fee),
+      deposited: Number(deposited), lost: Number(lost), won: Number(won) };
   });
 }
 
@@ -364,8 +379,8 @@ export function placeBet(player: Player, bet: ModeBet) {
       [player.id, bet.stake]
     );
     await db.query(
-      "INSERT INTO timed_bets (telegram_id, round_number, request_id, stake, fair_odds, live_bots, mode, placed_ms) " +
-      "VALUES ($1, $2, $3, $4, true, true, $5, $6)",
+      "INSERT INTO timed_bets (telegram_id, round_number, request_id, stake, fair_odds, live_bots, mode, placed_ms, house_fee_enabled) " +
+      "VALUES ($1, $2, $3, $4, true, true, $5, $6, true)",
       [player.id, bet.round, bet.requestId, bet.stake, bet.mode, now]
     );
     return readState(db, player, updated.rows[0], now, bet.mode);

@@ -12,6 +12,7 @@ export type DepositClaim = DepositState & { awarded: number };
 export type PublicStats = {
   played: number;
   houseNet: number;
+  houseFee: number;
   deposited: number;
   lost: number;
   won: number;

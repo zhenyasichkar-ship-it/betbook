@@ -1,5 +1,6 @@
 export const DAILY_BONUS = 100;
 export const ROUND_MS = 60_000;
+export const HOUSE_FEE_PERCENT = 5;
 export const ROULETTE_MODES = {
   low: { min: 1, max: 50, presets: [1, 10, 25, 50], seed: 0x249e3a },
   medium: { min: 10, max: 200, presets: [10, 50, 100, 200], seed: 0x72a0d8 },
@@ -26,13 +27,14 @@ export type Round = {
   participants: Participant[];
   stake: number;
   pot: number;
+  houseFee?: number;
 };
 export type GameState = {
   now: number;
   profile: Avatar & { balance: number; rounds: number; netLoss: number; bonusDay: string; isAdmin: boolean };
   offer: RoundOffer;
   bet: { stake: number; placedAt: number } | null;
-  feed: (Avatar & { round: number; pot: number; key: string })[];
+  feed: (Avatar & { round: number; pot: number; payout?: number; key: string })[];
   latest: Round;
   lastBet: Round | null;
 };
@@ -105,6 +107,14 @@ export function totalPot(offer: RoundOffer, stake: number) {
   return offer.bots.reduce((total, bot) => total + bot.stake, stake);
 }
 
+export function calculateHouseFee(pot: number) {
+  return Math.round(pot / (100 / HOUSE_FEE_PERCENT));
+}
+
+export function payoutAfterFee({ pot, houseFee = 0 }: Pick<Round, "pot" | "houseFee">) {
+  return pot - houseFee;
+}
+
 export function lineup(offer: RoundOffer, stake: number, player: Avatar): Participant[] {
   const pot = totalPot(offer, stake);
   const share = stake / pot;
@@ -138,6 +148,7 @@ export function resolveRound(offer: RoundOffer, stake: number, player: Avatar, d
 export function botRound(number: number, mode: RouletteMode) {
   const base = roundOffer(number, true, mode);
   const offer = liveOffer(base, 0, base.endsAt);
-  const ticket = Math.floor(randomFor(number ^ 0x51a537 ^ ROULETTE_MODES[mode].seed)() * totalPot(offer, 0));
-  return resolveRound(offer, 0, { name: "", avatar: 0, color: "" }, ticket);
+  const pot = totalPot(offer, 0);
+  const ticket = Math.floor(randomFor(number ^ 0x51a537 ^ ROULETTE_MODES[mode].seed)() * pot);
+  return { ...resolveRound(offer, 0, { name: "", avatar: 0, color: "" }, ticket), houseFee: calculateHouseFee(pot) };
 }

@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { MAX_DEPOSIT, type DepositClaim, type DepositState, type PublicStats } from "../lib/deposits";
+import { HOUSE_FEE_PERCENT } from "../lib/game";
 import { ApiError, OFFLINE, request } from "./api-client";
 import { cash } from "./roulette";
 
@@ -124,10 +125,11 @@ export function CasinoStats() {
           <dd>
             <span className="help-casino-value" key={houseText}>{houseText}</span>
             {stats && <span className="help-casino-equation">{cash(stats.lost)} програно − {cash(stats.won)} виграно</span>}
+            <span className="help-casino-equation">Комісія з банків ({HOUSE_FEE_PERCENT}%) · {stats ? cash(stats.houseFee ?? 0) : "—"}</span>
           </dd>
         </div>
       </dl>
-      <p>Віртуальні $. Поповнення включають бонуси та залишки на момент скидання. Виграші й програші — чистий підсумок кожного гравця після скидання.</p>
+      <p>Віртуальні $. Поповнення включають бонуси та залишки на момент скидання. Виграші й програші — чистий підсумок кожного гравця після скидання. Комісія округлюється до найближчого долара й уже врахована у виплатах.</p>
     </section>
   );
 }
